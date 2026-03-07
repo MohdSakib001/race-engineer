@@ -2,12 +2,17 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <title>Hello World!</title>
-
+    <title>Race Engineer</title>
   </head>
   <body>
-    <h1>💖 Hello World!</h1>
-    <p>Welcome to your Electron application.</p>
+    <div class="app-root">
+      <div class="card">
+        <h1 class="title">Race Engineer</h1>
+        <p class="subtitle">F1 24/25 Telemetry Listener</p>
+        <button id="start-listening" class="primary-button">Start Listening</button>
+        <p id="status-text" class="status-text">Idle</p>
+      </div>
+    </div>
     <script type="module" src="/src/renderer.js"></script>
   </body>
 </html>

@@ -26,8 +26,32 @@
  * ```
  */
 
-import './index.css';
+import "./index.css";
 
-console.log(
-  '👋 This message is being logged by "renderer.js", included via Vite',
-);
+const button = document.getElementById("start-listening");
+const statusEl = document.getElementById("status-text");
+
+if (button) {
+  button.addEventListener("click", () => {
+    if (
+      window.raceEngineer &&
+      typeof window.raceEngineer.startTelemetry === "function"
+    ) {
+      window.raceEngineer.startTelemetry();
+      if (statusEl) {
+        statusEl.textContent = "Starting telemetry...";
+      }
+    }
+  });
+}
+
+if (
+  window.raceEngineer &&
+  typeof window.raceEngineer.onTelemetryStarted === "function"
+) {
+  window.raceEngineer.onTelemetryStarted(() => {
+    if (statusEl) {
+      statusEl.textContent = "Telemetry listening on UDP 20777";
+    }
+  });
+}
