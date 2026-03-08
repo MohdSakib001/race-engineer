@@ -1,18 +1,79 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Race Engineer</title>
   </head>
   <body>
-    <div class="app-root">
-      <div class="card">
-        <h1 class="title">Race Engineer</h1>
-        <p class="subtitle">F1 24/25 Telemetry Listener</p>
-        <button id="start-listening" class="primary-button">Start Listening</button>
-        <p id="status-text" class="status-text">Idle</p>
-      </div>
+    <div id="app">
+      <!-- Sidebar -->
+      <aside id="sidebar">
+        <div class="sidebar-logo">
+          <span class="logo-icon">◈</span>
+          <span class="logo-text">RACE ENGINEER</span>
+        </div>
+
+        <nav class="sidebar-nav">
+          <a href="#dashboard" class="nav-item active" data-page="dashboard">
+            <span class="nav-icon">⊞</span>
+            <span class="nav-label">Dashboard</span>
+          </a>
+          <a href="#timing" class="nav-item" data-page="timing">
+            <span class="nav-icon">≡</span>
+            <span class="nav-label">Timing Tower</span>
+          </a>
+          <a href="#vehicle" class="nav-item" data-page="vehicle">
+            <span class="nav-icon">◎</span>
+            <span class="nav-label">Vehicle Status</span>
+          </a>
+          <a href="#session" class="nav-item" data-page="session">
+            <span class="nav-icon">◷</span>
+            <span class="nav-label">Session</span>
+          </a>
+          <a href="#engineer" class="nav-item" data-page="engineer">
+            <span class="nav-icon">✦</span>
+            <span class="nav-label">AI Engineer</span>
+          </a>
+          <a href="#settings" class="nav-item" data-page="settings">
+            <span class="nav-icon">⚙</span>
+            <span class="nav-label">Settings</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div id="connection-dot" class="conn-dot offline"></div>
+          <span id="connection-label">Offline · UDP :20777</span>
+        </div>
+      </aside>
+
+      <!-- Main content -->
+      <main id="content">
+        <!-- Top bar -->
+        <header id="topbar">
+          <div id="topbar-session">─</div>
+          <div id="topbar-center">
+            <span id="tb-pos">─</span>
+            <span id="tb-lap">─</span>
+            <span id="tb-time">─</span>
+          </div>
+          <div id="topbar-right">
+            <button id="btn-start" class="start-btn">▶ Start Listening</button>
+          </div>
+        </header>
+
+        <!-- Pages -->
+        <div id="pages">
+          <div id="page-dashboard" class="page active"></div>
+          <div id="page-timing"    class="page"></div>
+          <div id="page-vehicle"   class="page"></div>
+          <div id="page-session"   class="page"></div>
+          <div id="page-engineer"  class="page"></div>
+          <div id="page-settings"  class="page"></div>
+        </div>
+      </main>
     </div>
+
     <script type="module" src="/src/renderer.js"></script>
   </body>
 </html>

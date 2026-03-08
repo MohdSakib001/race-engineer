@@ -32,6 +32,10 @@
     "vite": "^5.4.21"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
     "electron-squirrel-startup": "^1.0.1"
+  },
+  "overrides": {
+    "esbuild": ">=0.25.0"
   }
 }

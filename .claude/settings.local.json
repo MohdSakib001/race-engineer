@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install @anthropic-ai/sdk --save)",
+      "Bash(npx vite build --config vite.renderer.config.mjs --mode development)"
+    ]
+  }
+}
