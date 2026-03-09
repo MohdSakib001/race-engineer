@@ -57,6 +57,7 @@ function normalizeListenPort(value) {
 }
 //  License & AI Engineer state
 const license = {
+  creditsRemaining: 0,
   racesRemaining: 0,
   qualifyingRemaining: 0,
   devMode: false,
@@ -75,6 +76,7 @@ const gptRealtime = {
   audioContext: null,
   audioQueue: [],           // ArrayBuffer chunks queued for playback
   audioPlaying: false,
+  currentSource: null,
   sampleRate: 24000,        // PCM16 24kHz from Realtime API
   // Settings
   voice: 'echo',            // alloy | echo | shimmer | fable | onyx | nova
@@ -111,7 +113,10 @@ const radio = {
     incident:  30000,
     flags:     15000,
     restart:   30000,
+    restart_green_go: 15000,
     normal:    60000,
+    slower_car_ahead: 30000,
+    car_rejoining_track: 30000,
     endrace:   45000,
     penalty:   30000,
     racecraft: 60000,
@@ -135,6 +140,7 @@ const radio = {
     fuelWarned: false,
     ersLowWarned: false,
     penalties: 0,
+    pitLaneActive: 0,
     // Battle tracking
     battleAheadStart: 0,     // timestamp when we first got within 1.5s
     battleBehindStart: 0,    // timestamp when car behind got within 1.5s
@@ -165,8 +171,29 @@ const radio = {
     lastBattleBatteryRivalBehind: -1,
     lastRadioText: '',
     lastRadioTextAt: 0,
+    redFlagPeriods: 0,
+    sessionFinished: false,
+    restartAwaitingLeaderThrottle: false,
+    rivalOffTrack: {},
   },
 };
+function normalizeRadioConfig(config) {
+  const defaults = getDefaultRadioConfig();
+  if (!config) return defaults;
+  const normalized = defaults;
+  for (const [cat, def] of Object.entries(defaults)) {
+    const savedCat = config[cat];
+    if (!savedCat || typeof savedCat !== 'object') continue;
+    normalized[cat].enabled = savedCat.enabled !== false;
+    normalized[cat].aiEnabled = savedCat.aiEnabled === true;
+    for (const sit of Object.keys(def.situations)) {
+      if (savedCat.situations && Object.prototype.hasOwnProperty.call(savedCat.situations, sit)) {
+        normalized[cat].situations[sit] = savedCat.situations[sit] !== false;
+      }
+    }
+  }
+  return normalized;
+}
 //  TTS  edge-tts-universal (Microsoft Edge neural voices, via main process) 
 const TTS_VOICES = [
   { id: 'en-GB-RyanNeural',    label: 'Ryan (British Male) ' },
@@ -206,6 +233,10 @@ async function ttsFlush() {
   tts.speaking = true;
   try {
     const base64 = await window.raceEngineer.ttsSpeak({ text, voice: tts.voice });
+    if (isPlayerRaceFinished()) {
+      tts.speaking = false;
+      return;
+    }
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -244,6 +275,7 @@ function gptInitAudio() {
 }
 function gptPlayChunk(base64Chunk) {
   if (!TTS_PRIMARY_WINDOW) return;
+  if (isPlayerRaceFinished()) return;
   gptInitAudio();
   const binary = atob(base64Chunk);
   const bytes = new Uint8Array(binary.length);
@@ -265,8 +297,100 @@ function gptDrainAudio() {
   const source = ctx.createBufferSource();
   source.buffer = buf;
   source.connect(ctx.destination);
-  source.onended = () => gptDrainAudio();
+  gptRealtime.currentSource = source;
+  source.onended = () => {
+    if (gptRealtime.currentSource === source) gptRealtime.currentSource = null;
+    gptDrainAudio();
+  };
   source.start();
+}
+function isRaceSession(session = state.session) {
+  return !!session && session.sessionType >= 10 && session.sessionType <= 12;
+}
+function getPlayerLap() {
+  return state.lapData?.[state.playerCarIndex] || null;
+}
+function isPlayerRaceFinished(session = state.session, lap = getPlayerLap()) {
+  if (!isRaceSession(session) || !lap) return false;
+  if (Number.isFinite(session.trackLength) && session.trackLength > 0 && Number.isFinite(session.totalLaps) && session.totalLaps > 0) {
+    const raceDistanceMeters = session.trackLength * session.totalLaps;
+    const finishToleranceMeters = Math.max(50, session.trackLength * 0.015);
+    if (Number.isFinite(lap.totalDistance) && lap.totalDistance >= raceDistanceMeters - finishToleranceMeters) {
+      return true;
+    }
+  }
+  if (lap.resultStatus >= 3) return true;
+  return Number.isFinite(session.totalLaps) && session.totalLaps > 0 && lap.currentLapNum > session.totalLaps;
+}
+function getRemainingRaceDistanceLaps(session = state.session, lap = getPlayerLap()) {
+  if (!isRaceSession(session) || !lap || !Number.isFinite(session.totalLaps) || session.totalLaps <= 0) return 0;
+  const fullLapsAfterCurrent = Math.max(0, session.totalLaps - lap.currentLapNum);
+  if (!Number.isFinite(session.trackLength) || session.trackLength <= 0) {
+    return fullLapsAfterCurrent;
+  }
+  const rawLapDistance = Number.isFinite(lap.lapDistance) ? lap.lapDistance : 0;
+  const lapDistance = Math.min(Math.max(rawLapDistance, 0), session.trackLength);
+  const currentLapRemaining = 1 - (lapDistance / session.trackLength);
+  return fullLapsAfterCurrent + Math.max(0, Math.min(1, currentLapRemaining));
+}
+function getTrackAheadGapMeters(fromLap, toLap, session = state.session) {
+  if (!session || !fromLap || !toLap || !Number.isFinite(session.trackLength) || session.trackLength <= 0) return null;
+  const trackLength = session.trackLength;
+  const fromDist = Number.isFinite(fromLap.lapDistance) ? fromLap.lapDistance : 0;
+  const toDist = Number.isFinite(toLap.lapDistance) ? toLap.lapDistance : 0;
+  let diff = toDist - fromDist;
+  while (diff < 0) diff += trackLength;
+  while (diff >= trackLength) diff -= trackLength;
+  return diff;
+}
+function getTrackProximityMeters(lapA, lapB, session = state.session) {
+  const ahead = getTrackAheadGapMeters(lapA, lapB, session);
+  const behind = getTrackAheadGapMeters(lapB, lapA, session);
+  if (ahead == null || behind == null) return null;
+  return Math.min(ahead, behind);
+}
+function isTrackLikeSurface(surface) {
+  return surface === 0 || surface === 1 || surface === 2 || surface === 10;
+}
+function isTelemetryOffTrack(telemetryEntry) {
+  const surfaces = telemetryEntry?.surfaceType;
+  if (!Array.isArray(surfaces) || surfaces.length === 0) return false;
+  return surfaces.some(surface => !isTrackLikeSurface(surface));
+}
+function clearEngineerPlayback() {
+  tts.queue = [];
+  tts.lastQueuedText = '';
+  tts.lastQueuedAt = 0;
+  if (tts.currentAudio) {
+    try {
+      tts.currentAudio.pause();
+      tts.currentAudio.currentTime = 0;
+    } catch {}
+    tts.currentAudio = null;
+  }
+  tts.speaking = false;
+  gptRealtime.audioQueue = [];
+  if (gptRealtime.currentSource) {
+    try {
+      gptRealtime.currentSource.onended = null;
+      gptRealtime.currentSource.stop();
+    } catch {}
+    gptRealtime.currentSource = null;
+  }
+  gptRealtime.audioPlaying = false;
+}
+function handleFinishedRaceRadioState() {
+  const finished = isPlayerRaceFinished();
+  if (finished) {
+    if (!radio.prev.sessionFinished) clearEngineerPlayback();
+    radio.prev.sessionFinished = true;
+    radio.prev.scenario = null;
+    radio.awaiting = false;
+    radio.prev.restartAwaitingLeaderThrottle = false;
+    return true;
+  }
+  if (radio.prev.sessionFinished) radio.prev.sessionFinished = false;
+  return false;
 }
 // Detect current session type from telemetry state
 function getCurrentSessionType() {
@@ -277,7 +401,6 @@ function getCurrentSessionType() {
 // Check if GPT AI is allowed for the current session type
 // Returns { allowed: bool, reason: string }
 function gptAllowedForSession() {
-  const sType = getCurrentSessionType();
   if (license.devMode) return { allowed: true, reason: 'dev' };
   if (license.byokMode) return { allowed: true, reason: 'byok' };
   if (!license.licenseKey) {
@@ -287,22 +410,13 @@ function gptAllowedForSession() {
     };
   }
   const exhausted = license.licenseStatus === 'exhausted'
-    || ((license.racesRemaining || 0) <= 0 && (license.qualifyingRemaining || 0) <= 0 && !!license.licenseKey);
-  if (sType === 'qualifying') {
-    if (license.qualifyingRemaining > 0) return { allowed: true, reason: 'credit' };
-    return {
-      allowed: false,
-      reason: exhausted
-        ? 'Your current license key is exhausted. Activate a new key or buy another pack.'
-        : `No qualifying credits. ${license.racesRemaining > 0 ? 'You have race credits — buy qualifying credits separately.' : 'Buy a race pack or qualifying pack.'}`,
-    };
-  }
-  if (license.racesRemaining > 0) return { allowed: true, reason: 'credit' };
+    || ((license.creditsRemaining || 0) <= 0 && !!license.licenseKey);
+  if ((license.creditsRemaining || 0) > 0) return { allowed: true, reason: 'credit' };
   return {
     allowed: false,
     reason: exhausted
       ? 'Your current license key is exhausted. Activate a new key or buy another pack.'
-      : 'No race credits. Buy a race pack or use BYOK mode.',
+      : 'No AI Engineer credits. Buy a credit pack or use BYOK mode.',
   };
 }
 //  GPT Realtime connection helpers
@@ -385,15 +499,6 @@ function updateGptStatusUI() {
 function gptPushTelemetry() {
   if (!gptRealtime.connected) return;
   if (!state.connected) return;
-  // Live session-type check: if session switched to qualifying with no credits, disconnect
-  if (!license.byokMode && !license.devMode) {
-    const sType = getCurrentSessionType();
-    if (sType === 'qualifying' && license.qualifyingRemaining <= 0) {
-      gptDisconnect();
-      appendRadioCard('system', 'medium', 'Qualifying session detected — no qualifying credits. GPT AI paused. Classic radio active.', true);
-      return;
-    }
-  }
   const now = Date.now();
   if (now - gptRealtime.lastPushAt < gptRealtime.pushIntervalMs) return;
   gptRealtime.lastPushAt = now;
@@ -523,22 +628,17 @@ function refreshLicenseBadges() {
     if (license.devMode) license.licenseStatus = 'dev';
     else if (license.byokMode) license.licenseStatus = 'byok';
     else if (!license.licenseKey) license.licenseStatus = 'no-key';
-    else if ((license.racesRemaining || 0) <= 0 && (license.qualifyingRemaining || 0) <= 0) license.licenseStatus = 'exhausted';
+    else if ((license.creditsRemaining || 0) <= 0) license.licenseStatus = 'exhausted';
     else license.licenseStatus = 'active';
   }
 
-  const racesText = license.devMode ? '∞' : String(license.racesRemaining ?? 0);
-  const qualsText = license.devMode ? '∞' : String(license.qualifyingRemaining ?? 0);
+  const creditsText = license.devMode ? 'Unlimited' : String(license.creditsRemaining ?? license.racesRemaining ?? 0);
 
-  const racesEl = el('mc-races');
-  const qualsEl = el('mc-quals');
-  if (racesEl) racesEl.textContent = racesText;
-  if (qualsEl) qualsEl.textContent = qualsText;
+  const modalCreditsEl = el('mc-credits');
+  if (modalCreditsEl) modalCreditsEl.textContent = creditsText;
 
-  const setRacesEl = el('set-race-credits');
-  const setQualsEl = el('set-qual-credits');
-  if (setRacesEl) setRacesEl.textContent = racesText;
-  if (setQualsEl) setQualsEl.textContent = qualsText;
+  const settingsCreditsEl = el('set-credits-remaining');
+  if (settingsCreditsEl) settingsCreditsEl.textContent = creditsText;
 
   const modeEl = el('set-license-mode');
   if (modeEl) modeEl.textContent = getLicenseModeLabel();
@@ -630,7 +730,7 @@ async function verifyPendingPayPalOrder({ silentPending = false } = {}) {
       'medium',
       result.needsActivation
         ? `${providerLabel} purchase captured. Activate key ${result.licenseKey || '(see Settings)'} to use credits on this machine.`
-        : `${providerLabel} purchase complete. Race credits: ${license.racesRemaining}, Qualifying: ${license.qualifyingRemaining}.`,
+        : `${providerLabel} purchase complete. Credits remaining: ${license.creditsRemaining}.`,
       true
     );
     paypalCheckout.pendingOrder = null;
@@ -653,7 +753,7 @@ function showPurchaseModal() {
     <div class="modal-box">
       <div class="modal-header">
         <span class="modal-icon">🏎</span>
-        <h2>AI Engineer — Race Packs</h2>
+        <h2>AI Engineer - Credits</h2>
         <button class="modal-close" id="modal-close-btn">✕</button>
       </div>
       <div class="modal-tabs">
@@ -663,7 +763,7 @@ function showPurchaseModal() {
       <!-- Subscription tab -->
       <div id="tab-content-subscription">
         <p class="modal-sub">Credits let you use GPT AI voice with our OpenAI key — no setup needed.
-          Pricing is based on race length and AI situations enabled.</p>
+          One credit covers one race or qualifying session. Pricing is based on race length and AI situations enabled.</p>
         <div class="modal-info-row">
           <span>AI situations active: <strong>${activeSits}</strong></span>
           <span>~${raceLaps} laps detected</span>
@@ -679,9 +779,8 @@ function showPurchaseModal() {
         <div id="modal-packs-loading" style="text-align:center;padding:20px;color:var(--text3)">Loading pricing…</div>
         <div id="modal-packs" class="modal-packs hidden"></div>
         <div class="modal-credits">
-          <span>Race credits: <strong id="mc-races">${license.devMode ? '∞' : license.racesRemaining}</strong></span>
-          <span>Qualifying credits: <strong id="mc-quals">${license.devMode ? '∞' : license.qualifyingRemaining}</strong></span>
-          ${license.devMode ? '<span class="dev-badge">DEV MODE — Free</span>' : ''}
+          <span>Credits remaining: <strong id="mc-credits">${license.devMode ? 'Unlimited' : (license.creditsRemaining ?? license.racesRemaining)}</strong></span>
+          ${license.devMode ? '<span class="dev-badge">DEV MODE - Free</span>' : ''}
         </div>
         <div id="modal-stripe-status" style="margin-top:8px;font-size:12px;color:var(--text3);min-height:18px"></div>
         <button class="settings-save-btn" id="modal-verify-btn" style="display:none;margin-top:8px;width:100%">
@@ -1047,6 +1146,193 @@ function fmtSector(ms) {
   const ms3 = ms % 1000;
   return `${s}.${String(ms3).padStart(3, '0')}`;
 }
+function computeSector3Time(lap) {
+  if (!lap) return 0;
+  const sector3Ms = (lap.lastLapTimeMs || 0) - (lap.sector1TimeMs || 0) - (lap.sector2TimeMs || 0);
+  return sector3Ms > 0 ? sector3Ms : 0;
+}
+function getRaceStatusMeta(car) {
+  if (!car) return null;
+  if (car.driverStatus === 0 && car.resultStatus <= 2) {
+    return { label: 'GAR', title: 'Garage', className: 'out' };
+  }
+  switch (car.resultStatus) {
+    case 3: return { label: 'FIN', title: 'Finished', className: 'finished' };
+    case 4: return { label: 'DNF', title: 'Did not finish', className: 'dnf' };
+    case 5: return { label: 'DSQ', title: 'Disqualified', className: 'dnf' };
+    case 6: return { label: 'NC', title: 'Not classified', className: 'out' };
+    case 7: return { label: 'RET', title: 'Retired', className: 'dnf' };
+    default: return null;
+  }
+}
+function renderRaceStatusBadge(car) {
+  const meta = getRaceStatusMeta(car);
+  return meta ? `<span class="status-badge ${meta.className}" title="${meta.title}">${meta.label}</span>` : '';
+}
+function renderControlBadge(participant, isPlayer) {
+  if (isPlayer) return '<span class="mini-badge you">YOU</span>';
+  if (!participant) return '';
+  return participant.aiControlled === 1
+    ? '<span class="mini-badge ai">AI</span>'
+    : '<span class="mini-badge human">PLY</span>';
+}
+function getClassificationCars(lapData) {
+  if (!Array.isArray(lapData)) return [];
+  return lapData
+    .map((lapEntry, idx) => lapEntry ? ({ ...lapEntry, idx }) : null)
+    .filter(car => car && (car.carPosition > 0 || car.resultStatus >= 3 || car.driverStatus === 0))
+    .sort((a, b) => {
+      const posA = a.carPosition > 0 ? a.carPosition : 1000 + a.idx;
+      const posB = b.carPosition > 0 ? b.carPosition : 1000 + b.idx;
+      return posA - posB;
+    });
+}
+function getTrackMapVisibleCars(lapData) {
+  return getClassificationCars(lapData).filter(car =>
+    car.carPosition > 0 &&
+    Number.isFinite(car.lapDistance) &&
+    car.lapDistance >= 0 &&
+    (car.resultStatus === 2 || car.resultStatus === 3) &&
+    car.driverStatus !== 0
+  );
+}
+function controlLabel(participant, isPlayer) {
+  if (isPlayer) return 'Player';
+  if (!participant) return '';
+  return participant.aiControlled === 1 ? 'AI' : 'Human';
+}
+function raceStatusLabel(car) {
+  return getRaceStatusMeta(car)?.title || (car?.resultStatus === 2 ? 'Active' : '');
+}
+function tyreCompoundLabel(statusEntry) {
+  if (!statusEntry) return '';
+  return TYRE_COMPOUNDS[statusEntry.visualTyreCompound]?.name
+    || ACTUAL_COMPOUNDS[statusEntry.actualTyreCompound]?.name
+    || '';
+}
+function formatGearValue(gear) {
+  if (gear == null) return '';
+  return gear <= 0 ? (gear === 0 ? 'N' : 'R') : String(gear);
+}
+function csvEscape(value) {
+  if (value == null) return '';
+  const text = String(value);
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+function safeFilePart(value, fallback = 'session') {
+  const normalized = String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || fallback;
+}
+function buildTimingExportRows() {
+  const parts = state.participants;
+  return getClassificationCars(state.lapData).map((car, rank) => {
+    const participant = parts?.participants?.[car.idx];
+    const statusEntry = state.allCarStatus?.[car.idx];
+    const telemetryEntry = state.allCarTelemetry?.[car.idx];
+    const bestLapMs = state.bestLapTimes[car.idx] || 0;
+    const gapToLeaderMs = rank === 0 ? 0 : (car.deltaToLeaderMs || 0);
+    const intervalMs = rank === 0 ? 0 : (car.deltaToCarAheadMs || 0);
+    return {
+      position: car.carPosition || '',
+      driver: participant?.name || `Car ${car.idx + 1}`,
+      control: controlLabel(participant, car.idx === state.playerCarIndex),
+      teamId: participant?.teamId ?? '',
+      status: raceStatusLabel(car),
+      pitStatus: car.pitStatus === 2 ? 'In Pit Area' : car.pitStatus === 1 ? 'Pitting' : 'Track',
+      gapToLeaderSeconds: gapToLeaderMs > 0 ? (gapToLeaderMs / 1000).toFixed(3) : '',
+      intervalSeconds: intervalMs > 0 ? (intervalMs / 1000).toFixed(3) : '',
+      currentLapNumber: car.currentLapNum || '',
+      lastLap: fmt(car.lastLapTimeMs),
+      lastLapMs: car.lastLapTimeMs || '',
+      bestLap: bestLapMs > 0 ? fmt(bestLapMs) : '',
+      bestLapMs,
+      sector1: fmtSector(car.sector1TimeMs),
+      sector1Ms: car.sector1TimeMs || '',
+      sector2: fmtSector(car.sector2TimeMs),
+      sector2Ms: car.sector2TimeMs || '',
+      sector3: fmtSector(computeSector3Time(car)),
+      sector3Ms: computeSector3Time(car) || '',
+      tyre: tyreCompoundLabel(statusEntry),
+      tyreAgeLaps: statusEntry?.tyresAgeLaps ?? '',
+      pits: car.numPitStops ?? '',
+      ersMJ: statusEntry ? (statusEntry.ersStoreEnergy / 1e6).toFixed(3) : '',
+      fuelRemainingLaps: statusEntry ? statusEntry.fuelRemainingLaps.toFixed(2) : '',
+      speedKph: telemetryEntry?.speed ?? '',
+      gear: formatGearValue(telemetryEntry?.gear),
+      throttlePct: telemetryEntry ? Math.round(telemetryEntry.throttle * 100) : '',
+      brakePct: telemetryEntry ? Math.round(telemetryEntry.brake * 100) : '',
+      engineRpm: telemetryEntry?.engineRPM ?? '',
+      lapDistanceMeters: Number.isFinite(car.lapDistance) ? car.lapDistance.toFixed(1) : '',
+      resultStatusCode: car.resultStatus ?? '',
+      driverStatusCode: car.driverStatus ?? '',
+    };
+  });
+}
+function buildTimingExportCsv() {
+  const rows = buildTimingExportRows();
+  const headers = [
+    'position', 'driver', 'control', 'teamId', 'status', 'pitStatus',
+    'gapToLeaderSeconds', 'intervalSeconds', 'currentLapNumber',
+    'lastLap', 'lastLapMs', 'bestLap', 'bestLapMs',
+    'sector1', 'sector1Ms', 'sector2', 'sector2Ms', 'sector3', 'sector3Ms',
+    'tyre', 'tyreAgeLaps', 'pits', 'ersMJ', 'fuelRemainingLaps',
+    'speedKph', 'gear', 'throttlePct', 'brakePct', 'engineRpm',
+    'lapDistanceMeters', 'resultStatusCode', 'driverStatusCode',
+  ];
+  const dataLines = rows.map((row) => headers.map((header) => csvEscape(row[header])).join(','));
+  return `\uFEFF${headers.join(',')}\n${dataLines.join('\n')}`;
+}
+function buildTimingExportJson() {
+  return JSON.stringify({
+    exportedAt: new Date().toISOString(),
+    track: state.session?.trackName || '',
+    sessionType: state.session?.sessionTypeName || '',
+    raceFinished: isPlayerRaceFinished(),
+    playerCarIndex: state.playerCarIndex,
+    standings: buildTimingExportRows(),
+    raw: {
+      session: state.session,
+      participants: state.participants,
+      lapData: state.lapData,
+      allCarStatus: state.allCarStatus,
+      allCarTelemetry: state.allCarTelemetry,
+      playerDamage: state.damage,
+      bestLapTimes: state.bestLapTimes,
+      fastestLapCar: state.fastestLapCar,
+      fastestLapMs: state.fastestLapMs,
+    },
+  }, null, 2);
+}
+async function exportTimingData(format = 'csv') {
+  const statusEl = el('timing-export-status');
+  if (!state.lapData || getClassificationCars(state.lapData).length === 0) {
+    if (statusEl) statusEl.textContent = 'No telemetry data to export.';
+    return;
+  }
+  const extension = format === 'json' ? 'json' : 'csv';
+  const content = format === 'json' ? buildTimingExportJson() : buildTimingExportCsv();
+  const stem = `race-engineer-${safeFilePart(state.session?.trackName, 'track')}-${safeFilePart(state.session?.sessionTypeName, 'session')}-${isPlayerRaceFinished() ? 'results' : 'snapshot'}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`;
+  if (statusEl) statusEl.textContent = format === 'json' ? 'Saving JSON export...' : 'Saving CSV export...';
+  const result = await window.raceEngineer.saveExportFile({
+    defaultName: `${stem}.${extension}`,
+    filters: format === 'json'
+      ? [{ name: 'JSON', extensions: ['json'] }]
+      : [{ name: 'CSV', extensions: ['csv'] }],
+    content,
+  });
+  if (statusEl) {
+    if (result?.success) statusEl.textContent = `${format.toUpperCase()} saved.`;
+    else if (result?.cancelled) statusEl.textContent = 'Export cancelled.';
+    else statusEl.textContent = result?.error || 'Export failed.';
+    setTimeout(() => {
+      const latest = el('timing-export-status');
+      if (latest) latest.textContent = '';
+    }, 4000);
+  }
+}
 function fmtCountdown(sec) {
   if (!sec || sec <= 0) return '0:00';
   const m = Math.floor(sec / 60);
@@ -1088,82 +1374,201 @@ function el(id) { return document.getElementById(id); }
 function popoutBtn(page, title, width, height) {
   return `<button class="popout-btn" onclick="window.raceEngineer.openWindow({page:'${page}',title:'${title}',width:${width || 1000},height:${height || 700}})">Pop Out</button>`;
 }
+function isActiveRunningCar(lapEntry) {
+  return !!lapEntry
+    && lapEntry.carPosition > 0
+    && lapEntry.resultStatus === 2
+    && lapEntry.driverStatus !== 0
+    && Number.isFinite(lapEntry.lapDistance)
+    && lapEntry.lapDistance >= 0;
+}
+function isDisplayComparableCar(lapEntry) {
+  return !!lapEntry
+    && lapEntry.carPosition > 0
+    && lapEntry.resultStatus >= 2
+    && lapEntry.driverStatus !== 0;
+}
+function hasPlayerTrackContext(session = state.session, lap = state.lapData?.[state.playerCarIndex], telemetry = state.telemetry) {
+  if (!session || !lap) return false;
+  if (session.gamePaused) return false;
+  if (!isActiveRunningCar(lap)) return false;
+  if (telemetry && telemetry.speed <= 1 && (lap.currentLapNum || 0) <= 0) return false;
+  return true;
+}
+function hasBatteryDisplayContext(session = state.session, lap = state.lapData?.[state.playerCarIndex]) {
+  if (!session || !lap) return false;
+  if (session.gamePaused) return false;
+  return isDisplayComparableCar(lap);
+}
+function isPreStraightWindow(telemetryEntry, statusEntry, minSpeed = 130, maxSpeed = 220) {
+  if (!telemetryEntry) return false;
+  const deployMode = statusEntry?.ersDeployMode ?? 0;
+  return (telemetryEntry.speed || 0) >= minSpeed
+    && (telemetryEntry.speed || 0) <= maxSpeed
+    && (telemetryEntry.throttle || 0) >= 0.72
+    && (telemetryEntry.brake || 0) <= 0.05
+    && Math.abs(telemetryEntry.steer || 0) <= 0.18
+    && deployMode <= 1;
+}
+function shouldSpeakBattleBattery(gapMs, playerTelemetry, rivalTelemetry, rivalLap, session = state.session, lap = state.lapData?.[state.playerCarIndex]) {
+  if (!hasPlayerTrackContext(session, lap, playerTelemetry)) return false;
+  if (!isActiveRunningCar(rivalLap)) return false;
+  if (!(gapMs > 0 && gapMs <= 1000)) return false;
+  if ((lap?.currentLapNum || 0) <= 1) return false;
+  if (!isPreStraightWindow(playerTelemetry, state.status, 130, 220)) return false;
+  if (rivalTelemetry) {
+    if ((rivalTelemetry.speed || 0) < 80) return false;
+    if ((rivalTelemetry.brake || 0) > 0.12) return false;
+    if (Math.abs(rivalTelemetry.steer || 0) > 0.18) return false;
+  }
+  return true;
+}
+function getAdjacentComparableCars() {
+  const lap = state.lapData?.[state.playerCarIndex];
+  if (!isDisplayComparableCar(lap) || !Array.isArray(state.lapData)) {
+    return { lap, carAheadLap: null, carBehindLap: null, aheadIdx: -1, behindIdx: -1 };
+  }
+  const myPos = lap.carPosition;
+  const carAheadLap = state.lapData.find((entry) => entry?.carPosition === myPos - 1 && isDisplayComparableCar(entry));
+  const carBehindLap = state.lapData.find((entry) => entry?.carPosition === myPos + 1 && isDisplayComparableCar(entry));
+  return {
+    lap,
+    carAheadLap: carAheadLap || null,
+    carBehindLap: carBehindLap || null,
+    aheadIdx: carAheadLap ? state.lapData.indexOf(carAheadLap) : -1,
+    behindIdx: carBehindLap ? state.lapData.indexOf(carBehindLap) : -1,
+  };
+}
+function getAdjacentRunningCars() {
+  const lap = state.lapData?.[state.playerCarIndex];
+  if (!isActiveRunningCar(lap) || !Array.isArray(state.lapData)) {
+    return { lap, carAheadLap: null, carBehindLap: null, aheadIdx: -1, behindIdx: -1 };
+  }
+  const myPos = lap.carPosition;
+  const carAheadLap = state.lapData.find((entry) => entry?.carPosition === myPos - 1 && isActiveRunningCar(entry));
+  const carBehindLap = state.lapData.find((entry) => entry?.carPosition === myPos + 1 && isActiveRunningCar(entry));
+  return {
+    lap,
+    carAheadLap: carAheadLap || null,
+    carBehindLap: carBehindLap || null,
+    aheadIdx: carAheadLap ? state.lapData.indexOf(carAheadLap) : -1,
+    behindIdx: carBehindLap ? state.lapData.indexOf(carBehindLap) : -1,
+  };
+}
+function createBatteryComparison(side, rivalIdx, rivalLap, rivalStatus, myErsMJ, myErsPct, myPos) {
+  if (rivalIdx < 0 || !isActiveRunningCar(rivalLap) || !rivalStatus) return null;
+  const rivalName = state.participants?.participants?.[rivalIdx]?.name || `P${side === 'ahead' ? myPos - 1 : myPos + 1}`;
+  const rivalMJ = rivalStatus.ersStoreEnergy / 1e6;
+  const rivalPct = (rivalStatus.ersStoreEnergy / 4000000) * 100;
+  const advantageMJ = +(myErsMJ - rivalMJ).toFixed(2);
+  const advantagePct = +(myErsPct - rivalPct).toFixed(1);
+  return {
+    side,
+    name: rivalName,
+    rivalMJ,
+    rivalPct,
+    advantageMJ,
+    advantagePct,
+    relationLabel: side === 'ahead' ? 'car ahead' : 'car behind',
+    trend: advantageMJ > 0 ? 'advantage' : advantageMJ < 0 ? 'disadvantage' : 'neutral',
+  };
+}
 //  Battery delta helper 
 function getBatteryDelta() {
   const sts = state.status;
-  const lap = state.lapData?.[state.playerCarIndex];
-  if (!sts || !lap || !state.allCarStatus) return null;
+  if (!sts || !state.allCarStatus) return null;
+  const { lap, carAheadLap, carBehindLap, aheadIdx, behindIdx } = getAdjacentComparableCars();
+  if (!hasBatteryDisplayContext(state.session, lap)) return null;
   const myErsMJ = sts.ersStoreEnergy / 1e6;
   const myErsPct = (sts.ersStoreEnergy / 4000000) * 100;
   const myPos = lap.carPosition;
-  const carAheadLap = state.lapData?.find(l => l?.carPosition === myPos - 1);
-  const carBehindLap = state.lapData?.find(l => l?.carPosition === myPos + 1);
-  const aheadIdx = carAheadLap ? state.lapData.indexOf(carAheadLap) : -1;
-  const behindIdx = carBehindLap ? state.lapData.indexOf(carBehindLap) : -1;
   const aheadSts = aheadIdx >= 0 ? state.allCarStatus[aheadIdx] : null;
   const behindSts = behindIdx >= 0 ? state.allCarStatus[behindIdx] : null;
-  const aheadName = state.participants?.participants?.[aheadIdx]?.name || null;
-  const behindName = state.participants?.participants?.[behindIdx]?.name || null;
-  let aheadDelta = null;
-  if (aheadSts) {
-    const theirMJ = aheadSts.ersStoreEnergy / 1e6;
-    const theirPct = (aheadSts.ersStoreEnergy / 4000000) * 100;
-    aheadDelta = {
-      name: aheadName || `P${myPos - 1}`,
-      myMJ: myErsMJ, theirMJ,
-      deltaMJ: +(myErsMJ - theirMJ).toFixed(2),
-      deltaPct: +(myErsPct - theirPct).toFixed(1),
-    };
-  }
-  let behindDelta = null;
-  if (behindSts) {
-    const theirMJ = behindSts.ersStoreEnergy / 1e6;
-    const theirPct = (behindSts.ersStoreEnergy / 4000000) * 100;
-    behindDelta = {
-      name: behindName || `P${myPos + 1}`,
-      myMJ: myErsMJ, theirMJ,
-      deltaMJ: +(myErsMJ - theirMJ).toFixed(2),
-      deltaPct: +(myErsPct - theirPct).toFixed(1),
-    };
-  }
-  return { myMJ: +myErsMJ.toFixed(2), myPct: +myErsPct.toFixed(1), ahead: aheadDelta, behind: behindDelta };
+  const aheadDelta = createBatteryComparison('ahead', aheadIdx, carAheadLap, aheadSts, myErsMJ, myErsPct, myPos);
+  const behindDelta = createBatteryComparison('behind', behindIdx, carBehindLap, behindSts, myErsMJ, myErsPct, myPos);
+  return {
+    myMJ: +myErsMJ.toFixed(2),
+    myPct: +myErsPct.toFixed(1),
+    ahead: aheadDelta,
+    behind: behindDelta,
+  };
 }
 function batteryDeltaHTML(delta) {
   if (!delta) return '';
+  const formatComparison = (comparison, title) => {
+    if (!comparison) return '';
+    const pct = comparison.advantagePct || 0;
+    const mj = comparison.advantageMJ || 0;
+    const cls = comparison.trend;
+    const sign = pct > 0 ? '+' : pct < 0 ? '-' : '';
+    const trendText = cls === 'neutral' ? 'level' : cls;
+    return `<div class="battery-delta">
+      <span class="battery-delta-label">${title}: ${comparison.name}</span>
+      <span class="battery-delta-value ${cls}">${sign}${Math.abs(pct).toFixed(1)}% (${sign}${Math.abs(mj).toFixed(2)} MJ) ${trendText}</span>
+    </div>`;
+  };
   let html = '';
-  if (delta.ahead) {
-    const cls = delta.ahead.deltaMJ > 0 ? 'advantage' : delta.ahead.deltaMJ < 0 ? 'disadvantage' : 'neutral';
-    const sign = delta.ahead.deltaMJ > 0 ? '+' : '';
-    html += `<div class="battery-delta">
-      <span class="battery-delta-label">vs ${delta.ahead.name} (ahead):</span>
-      <span class="battery-delta-value ${cls}">${sign}${delta.ahead.deltaMJ.toFixed(2)} MJ (${sign}${delta.ahead.deltaPct.toFixed(1)}%)</span>
-    </div>`;
-  }
-  if (delta.behind) {
-    const cls = delta.behind.deltaMJ > 0 ? 'advantage' : delta.behind.deltaMJ < 0 ? 'disadvantage' : 'neutral';
-    const sign = delta.behind.deltaMJ > 0 ? '+' : '';
-    html += `<div class="battery-delta">
-      <span class="battery-delta-label">vs ${delta.behind.name} (behind):</span>
-      <span class="battery-delta-value ${cls}">${sign}${delta.behind.deltaMJ.toFixed(2)} MJ (${sign}${delta.behind.deltaPct.toFixed(1)}%)</span>
-    </div>`;
-  }
+  html += formatComparison(delta.ahead, 'Car ahead');
+  html += formatComparison(delta.behind, 'Car behind');
   return html;
 }
 //  Top bar updater 
 function updateTopBar() {
   const lap = state.lapData?.[state.playerCarIndex];
   const ses = state.session;
-  const tel = state.telemetry;
   if (ses) {
     const sc = ses.safetyCarStatus ? `  ${safetyCarLabel(ses.safetyCarStatus)}` : '';
     el('topbar-session').textContent =
       `${ses.trackName || ''}  ${ses.sessionTypeName || ''}${sc}`;
+  } else {
+    el('topbar-session').textContent = 'Waiting for telemetry';
   }
   if (lap) {
     el('tb-pos').innerHTML = `P<strong>${lap.carPosition || ''}</strong>`;
     el('tb-lap').innerHTML = `Lap <strong>${lap.currentLapNum || ''}/${ses?.totalLaps || ''}</strong>`;
     el('tb-time').innerHTML = `<strong>${fmt(lap.currentLapTimeMs)}</strong>`;
+  } else {
+    el('tb-pos').innerHTML = 'P<strong>-</strong>';
+    el('tb-lap').innerHTML = 'Lap <strong>-/-</strong>';
+    el('tb-time').innerHTML = '<strong>-:--.---</strong>';
   }
+}
+function clearTelemetryStateCache() {
+  state.session = null;
+  state.participants = null;
+  state.lapData = null;
+  state.telemetry = null;
+  state.status = null;
+  state.damage = null;
+  state.allCarStatus = null;
+  state.allCarTelemetry = null;
+  state.playerCarIndex = 0;
+  state.bestLapTimes = {};
+  state.fastestLapCar = -1;
+  state.fastestLapMs = 0;
+  clearEngineerPlayback();
+  lastAutoRadioCheck = 0;
+}
+function resetTelemetryPanels() {
+  const builders = {
+    dashboard: buildDashboard,
+    timing: buildTiming,
+    trackmap: buildTrackMap,
+    vehicle: buildVehicle,
+    session: buildSession,
+  };
+  if (DETACH_PAGE) {
+    const builder = builders[DETACH_PAGE];
+    if (builder) builder();
+    updateTopBar();
+    return;
+  }
+  buildDashboard();
+  buildTiming();
+  buildTrackMap();
+  buildVehicle();
+  buildSession();
+  updateTopBar();
 }
 //  Dashboard page 
 function buildDashboard() {
@@ -1283,6 +1688,7 @@ function buildDashboard() {
           <div class="stat-row"><span class="stat-label">Last lap</span><span class="stat-value mono" id="d-last-lap"></span></div>
           <div class="stat-row"><span class="stat-label">Sector 1</span><span class="stat-value mono" id="d-s1"></span></div>
           <div class="stat-row"><span class="stat-label">Sector 2</span><span class="stat-value mono" id="d-s2"></span></div>
+          <div class="stat-row"><span class="stat-label">Sector 3</span><span class="stat-value mono" id="d-s3"></span></div>
           <div class="stat-row"><span class="stat-label">Pit stops</span><span class="stat-value" id="d-pits"></span></div>
           <div class="stat-row"><span class="stat-label">Tyre age</span><span class="stat-value" id="d-tyre-age"> laps</span></div>
           <div style="margin-top:8px">
@@ -1386,6 +1792,7 @@ function updateDashboard() {
     el('d-last-lap').textContent = fmt(lap.lastLapTimeMs);
     el('d-s1').textContent = fmtSector(lap.sector1TimeMs);
     el('d-s2').textContent = fmtSector(lap.sector2TimeMs);
+    el('d-s3').textContent = fmtSector(computeSector3Time(lap));
     el('d-pits').textContent = lap.numPitStops;
     // Race progress
     const ses = state.session;
@@ -1493,8 +1900,15 @@ function updateDashboard() {
 //  Timing Tower 
 function buildTiming() {
   el('page-timing').innerHTML = `
-    <div style="padding:8px 16px 0;display:flex;justify-content:flex-end">${popoutBtn('timing', 'Timing Tower', 900, 800)}</div>
-    <div style="padding:0 0 0; overflow-x:auto; height:calc(100% - 40px)">
+    <div class="page-toolbar">
+      <span class="page-toolbar-status" id="timing-export-status"></span>
+      <div class="page-toolbar-actions">
+        <button class="popout-btn" id="timing-export-csv">Export CSV</button>
+        <button class="popout-btn" id="timing-export-json">Export JSON</button>
+        ${popoutBtn('timing', 'Timing Tower', 900, 800)}
+      </div>
+    </div>
+    <div style="padding:0 0 0; overflow-x:auto; height:calc(100% - 52px)">
       <table class="timing-table">
         <thead>
           <tr>
@@ -1519,17 +1933,23 @@ function buildTiming() {
       </table>
     </div>
   `;
+  el('timing-export-csv')?.addEventListener('click', () => { exportTimingData('csv').catch(() => {}); });
+  el('timing-export-json')?.addEventListener('click', () => { exportTimingData('json').catch(() => {}); });
 }
 function updateTiming() {
   const lapData = state.lapData;
   const parts = state.participants;
-  if (!lapData) return;
-  // Build sorted car list by position
-  const cars = lapData
-    .map((l, i) => ({ ...l, idx: i }))
-    .filter(c => c && c.resultStatus >= 2 && c.carPosition > 0)
-    .sort((a, b) => a.carPosition - b.carPosition);
-  if (cars.length === 0) return;
+  const body = el('timing-body');
+  if (!body) return;
+  if (!lapData) {
+    body.innerHTML = '<tr><td colspan="13"><div class="empty-state"><div class="empty-icon"></div><div class="empty-text">Waiting for telemetry</div></div></td></tr>';
+    return;
+  }
+  const cars = getClassificationCars(lapData);
+  if (cars.length === 0) {
+    body.innerHTML = '<tr><td colspan="13"><div class="empty-state"><div class="empty-icon"></div><div class="empty-text">No classified cars yet</div></div></td></tr>';
+    return;
+  }
   const rows = cars.map((car, rank) => {
     const p = parts?.participants?.[car.idx];
     const teamId = p?.teamId ?? -1;
@@ -1563,19 +1983,15 @@ function updateTiming() {
     if (car.pitStatus === 1)      pitCell = '<span class="pit-badge in-lane">PIT LANE</span>';
     else if (car.pitStatus === 2) pitCell = '<span class="pit-badge in-pit">IN PIT</span>';
     else                          pitCell = `<span class="pit-badge">${car.numPitStops}</span>`;
-    // Result / driver status
-    let statusCell = '';
-    if (car.resultStatus === 3)      statusCell = '<span class="status-badge dnf">DNF</span>';
-    else if (car.resultStatus === 4) statusCell = '<span class="status-badge dnf">DSQ</span>';
-    else if (car.resultStatus === 5) statusCell = '<span class="status-badge out">NC</span>';
-    else if (car.driverStatus === 0) statusCell = '<span class="status-badge out">Garage</span>';
+    const statusCell = renderRaceStatusBadge(car);
+    const controlBadge = renderControlBadge(p, isPlayer);
     return `
       <tr class="${isPlayer ? 'player-row' : ''}${isFastest ? ' fastest-row' : ''}">
-        <td class="pos-cell">${car.carPosition}</td>
+        <td class="pos-cell">${car.carPosition || '-'}</td>
         <td class="driver-cell">
           <span class="team-bar" style="background:${color}"></span>
           <span class="driver-name">${name}</span>
-          ${isPlayer ? '<span style="font-size:10px;color:var(--accent);margin-left:4px">YOU</span>' : ''}
+          ${controlBadge}
         </td>
         <td class="right gap-time">${gapStr}</td>
         <td class="right gap-time">${intervalStr}</td>
@@ -1583,14 +1999,14 @@ function updateTiming() {
         <td class="right lap-time ${bestClass}">${bestStr}</td>
         <td class="right sector-time">${fmtSector(car.sector1TimeMs)}</td>
         <td class="right sector-time">${fmtSector(car.sector2TimeMs)}</td>
-        <td class="right sector-time">${fmtSector(car.lastLapTimeMs > 0 && car.sector1TimeMs > 0 && car.sector2TimeMs > 0 ? car.lastLapTimeMs - car.sector1TimeMs - car.sector2TimeMs : 0)}</td>
+        <td class="right sector-time">${fmtSector(computeSector3Time(car))}</td>
         <td class="center">${compound ? tyreBadge(compound) : ''}</td>
         <td class="center text-dim">${tyreAge}</td>
         <td class="center">${pitCell}</td>
         <td class="center">${statusCell}</td>
       </tr>`;
   }).join('');
-  el('timing-body').innerHTML = rows;
+  body.innerHTML = rows;
 }
 //  Track Map 
 function buildTrackMap() {
@@ -1612,9 +2028,9 @@ function buildTrackMap() {
         <div class="battery-pct-bar" style="margin-top:6px"><div class="battery-pct-fill" id="tm-ers-bar" style="width:0%"></div></div>
         <div id="tm-battery-delta" style="margin-top:8px"></div>
       </div>
-      <div class="panel" style="padding:8px 0">
+      <div class="panel trackmap-car-panel" style="padding:8px 0">
         <div class="panel-header">Cars on Track</div>
-        <div id="trackmap-car-list" class="trackmap-car-list" style="max-height:400px;overflow-y:auto"></div>
+        <div id="trackmap-car-list" class="trackmap-car-list"></div>
       </div>
     </div>
   `;
@@ -1623,7 +2039,15 @@ function updateTrackMap() {
   const ses = state.session;
   const lapData = state.lapData;
   const parts = state.participants;
-  if (!ses || !lapData) return;
+  const wrap = el('trackmap-svg-wrap');
+  if (!wrap) return;
+  if (!ses || !lapData) {
+    const titleEl = el('trackmap-title');
+    if (titleEl) titleEl.textContent = 'Track Map';
+    wrap.innerHTML = '<div class="trackmap-no-data">Waiting for telemetry</div>';
+    updateTrackMapCarList(null, parts);
+    return;
+  }
   const trackId = ses.trackId;
   const circuit = CIRCUITS[trackId];
   const titleEl = el('trackmap-title');
@@ -1641,17 +2065,13 @@ function updateTrackMap() {
     const tmDelta = el('tm-battery-delta');
     if (tmDelta) tmDelta.innerHTML = batteryDeltaHTML(getBatteryDelta());
   }
-  const wrap = el('trackmap-svg-wrap');
-  if (!wrap) return;
   if (!circuit) {
     wrap.innerHTML = '<div class="trackmap-no-data">No track map available for this circuit</div>';
     updateTrackMapCarList(lapData, parts);
     return;
   }
   // Build active cars list sorted by position
-  const cars = lapData
-    .map((l, i) => ({ ...l, idx: i }))
-    .filter(c => c && c.resultStatus >= 2 && c.carPosition > 0);
+  const cars = getTrackMapVisibleCars(lapData);
   // Create or update SVG
   let svg = wrap.querySelector('svg');
   if (!svg || svg.dataset.trackId !== String(trackId)) {
@@ -1692,8 +2112,8 @@ function updateTrackMap() {
     dot.setAttribute('cx', pt.x);
     dot.setAttribute('cy', pt.y);
     dot.setAttribute('fill', color);
-    dot.setAttribute('stroke', '#fff');
     dot.setAttribute('class', `car-dot${isPlayer ? ' player-dot' : ''}`);
+    dot.style.color = color;
     svg.appendChild(dot);
     // Position number label
     const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -1708,12 +2128,9 @@ function updateTrackMap() {
 function updateTrackMapCarList(lapData, parts) {
   const listEl = el('trackmap-car-list');
   if (!listEl) return;
-  const cars = lapData
-    .map((l, i) => ({ ...l, idx: i }))
-    .filter(c => c && c.resultStatus >= 2 && c.carPosition > 0)
-    .sort((a, b) => a.carPosition - b.carPosition);
+  const cars = getClassificationCars(lapData);
   if (cars.length === 0) {
-    listEl.innerHTML = '<div style="padding:12px;color:var(--text3);font-size:12px">No cars on track</div>';
+    listEl.innerHTML = '<div style="padding:12px;color:var(--text3);font-size:12px">No telemetry available</div>';
     return;
   }
   listEl.innerHTML = cars.map(car => {
@@ -1724,6 +2141,8 @@ function updateTrackMapCarList(lapData, parts) {
     const isPlayer = car.idx === state.playerCarIndex;
     const sts = state.allCarStatus?.[car.idx];
     const ersMJ = sts ? (sts.ersStoreEnergy / 1e6).toFixed(2) : '';
+    const statusBadge = renderRaceStatusBadge(car);
+    const controlBadge = renderControlBadge(p, isPlayer);
     let gapStr = '';
     if (car.carPosition === 1) gapStr = 'Leader';
     else {
@@ -1731,11 +2150,19 @@ function updateTrackMapCarList(lapData, parts) {
       gapStr = gapMs > 0 ? `+${(gapMs / 1000).toFixed(1)}s` : '';
     }
     return `<div class="trackmap-car-item ${isPlayer ? 'player' : ''}">
-      <span class="trackmap-car-pos">${car.carPosition}</span>
+      <span class="trackmap-car-pos">${car.carPosition || '-'}</span>
       <span class="trackmap-car-dot-legend" style="background:${color}"></span>
-      <span class="trackmap-car-name">${name}${isPlayer ? ' <span style="color:var(--accent);font-size:10px">YOU</span>' : ''}</span>
-      <span style="font-size:10px;color:var(--accent2);font-family:Consolas,monospace">${ersMJ} MJ</span>
-      <span class="trackmap-car-gap">${gapStr}</span>
+      <div class="trackmap-car-main">
+        <div class="trackmap-car-meta">
+          <span class="trackmap-car-name">${name}</span>
+          ${controlBadge}
+          ${statusBadge}
+        </div>
+        <div class="trackmap-car-sub">
+          <span class="trackmap-car-ers">${ersMJ ? `${ersMJ} MJ ERS` : 'ERS --'}</span>
+          <span class="trackmap-car-gap">${gapStr}</span>
+        </div>
+      </div>
     </div>`;
   }).join('');
 }
@@ -2207,17 +2634,17 @@ function buildRaceContext(includeRivals = true) {
     if (battDelta.ahead) {
       ctx.batteryVsAhead = {
         name: battDelta.ahead.name,
-        deltaMJ: battDelta.ahead.deltaMJ,
-        deltaPct: battDelta.ahead.deltaPct,
-        advantage: battDelta.ahead.deltaMJ > 0,
+        deltaMJ: battDelta.ahead.advantageMJ,
+        deltaPct: battDelta.ahead.advantagePct,
+        advantage: battDelta.ahead.advantageMJ > 0,
       };
     }
     if (battDelta.behind) {
       ctx.batteryVsBehind = {
         name: battDelta.behind.name,
-        deltaMJ: battDelta.behind.deltaMJ,
-        deltaPct: battDelta.behind.deltaPct,
-        advantage: battDelta.behind.deltaMJ > 0,
+        deltaMJ: battDelta.behind.advantageMJ,
+        deltaPct: battDelta.behind.advantagePct,
+        advantage: battDelta.behind.advantageMJ > 0,
       };
     }
   }
@@ -2274,9 +2701,12 @@ function isFiveLapTyreCheckpoint(lapNum) {
   return Number.isFinite(lapNum) && lapNum > 0 && lapNum % 5 === 0;
 }
 function formatBattleBatteryInfo(rivalName, relativePos, deltaPct) {
-  const sign = deltaPct >= 0 ? '+' : '-';
-  const trend = deltaPct >= 0 ? 'advantage' : 'disadvantage';
-  return `Battery vs ${rivalName} ${relativePos}: ${sign}${Math.abs(deltaPct).toFixed(0)}% ${trend}.`;
+  const trend = deltaPct > 0 ? 'advantage' : deltaPct < 0 ? 'disadvantage' : 'neutral';
+  const relation = relativePos === 'ahead' ? 'car ahead' : 'car behind';
+  const label = rivalName ? `${rivalName} (${relation})` : relation;
+  return trend === 'neutral'
+    ? `Battery level equal to ${label}.`
+    : `Battery ${trend} to ${label}: ${Math.abs(deltaPct).toFixed(0)}%.`;
 }
 function shouldEmitBattleBattery(side, rivalIdx, deltaPct) {
   if (Math.abs(deltaPct) < 8) return false;
@@ -2365,13 +2795,22 @@ function appendRadioCard(category, urgency, text, isError) {
   // Keep max 30 messages
   while (feedEl.children.length > 30) feedEl.removeChild(feedEl.lastChild);
 }
-// Emit a local (no API) radio message  checks category config
-function emitLocalRadio(category, urgency, text) {
-  // Check if category is enabled in config
+function isRadioSituationEnabled(category, situationKey = null) {
   const catKey = getCategoryForRadio(category);
-  if (catKey && radio.config[catKey] && !radio.config[catKey].enabled) return;
-  if (!canTrigger(category)) return;
-  markTriggered(category);
+  if (!catKey) return true;
+  const cfg = radio.config[catKey];
+  if (cfg && !cfg.enabled) return false;
+  if (!situationKey) return false;
+  if (!cfg?.situations || !Object.prototype.hasOwnProperty.call(cfg.situations, situationKey)) return false;
+  return cfg.situations[situationKey] !== false;
+}
+// Emit a local (no API) radio message  checks category config
+function emitLocalRadio(category, urgency, text, situationKey = null, options = {}) {
+  if (isPlayerRaceFinished()) return;
+  if (!isRadioSituationEnabled(category, situationKey)) return;
+  const cooldownKey = options.cooldownKey || category;
+  if (!options.skipCooldown && !canTrigger(cooldownKey)) return;
+  if (!options.skipCooldown) markTriggered(cooldownKey);
   appendRadioCard(category, urgency, text, false);
 }
 // Map radio categories to config keys
@@ -2445,14 +2884,17 @@ function detectRaceStart() {
     if (pos < grid) {
       const gained = grid - pos;
       emitLocalRadio('start', 'high',
-        RADIO_MESSAGES.start_gained_places({ position: pos, grid, placesGained: gained }).text);
+        RADIO_MESSAGES.start_gained_places({ position: pos, grid, placesGained: gained }).text,
+        'start_gained_places');
     } else if (pos > grid) {
       const lost = pos - grid;
       emitLocalRadio('start', 'high',
-        RADIO_MESSAGES.start_lost_places({ position: pos, grid: grid, placesLost: lost }).text);
+        RADIO_MESSAGES.start_lost_places({ position: pos, grid: grid, placesLost: lost }).text,
+        'start_lost_places');
     } else {
       emitLocalRadio('start', 'high',
-        `Lights out! P${grid}. Held position. Stay clean, manage the tyres.`);
+        `Lights out! P${grid}. Held position. Stay clean, manage the tyres.`,
+        'start_grid_held');
     }
     // Cold tyres warning on lap 1
     const tel = state.telemetry;
@@ -2461,7 +2903,8 @@ function detectRaceStart() {
       if (avgTemp < 70) {
         setTimeout(() => {
           emitLocalRadio('start', 'medium',
-            RADIO_MESSAGES.start_cold_tyres({ avgTemp }).text);
+            RADIO_MESSAGES.start_cold_tyres({ avgTemp }).text,
+            'start_cold_tyres');
         }, 8000);
       }
     }
@@ -2472,7 +2915,9 @@ function detectRaceStart() {
     const pos = lap.carPosition;
     if (pos < grid - 2 && canTrigger('start')) {
       emitLocalRadio('start', 'high',
-        `Brilliant start! Through to P${pos} from P${grid}. ${grid - pos} places gained into Turn 1!`);
+        `Brilliant start! Through to P${pos} from P${grid}. ${grid - pos} places gained into Turn 1!`,
+        'start_t1_jump',
+        { skipCooldown: true });
     }
   }
   radio.prev.lap = lap.currentLapNum;
@@ -2484,14 +2929,25 @@ function detectPositionChange() {
   const pos = lap.carPosition;
   const prevPos = radio.prev.position;
   if (prevPos > 0 && pos !== prevPos) {
+    const deltaPositions = Math.abs(pos - prevPos);
+    if (deltaPositions > 3 && lap.currentLapNum > 1) {
+      radio.prev.position = pos;
+      return;
+    }
     if (pos < prevPos) {
       const gained = prevPos - pos;
       emitLocalRadio('overtake', 'medium',
-        `Good move! P${pos} now. Gained ${gained} position${gained > 1 ? 's' : ''}. Keep pushing.`);
+        gained === 1
+          ? `Good move! P${pos} now. Gained ${gained} position.`
+          : `Position gain. P${pos} now, up ${gained} places.`,
+        'position_gained');
     } else {
       const lost = pos - prevPos;
       emitLocalRadio('normal', 'high',
-        `Lost ${lost} position${lost > 1 ? 's' : ''}. P${pos} now. Stay focused.`);
+        lost === 1
+          ? `Lost 1 position. P${pos} now.`
+          : `Position loss. P${pos} now, down ${lost} places.`,
+        'position_lost');
     }
   }
   radio.prev.position = pos;
@@ -2508,16 +2964,16 @@ function detectTyreWear() {
   const worstTyre = posLabel[worstIdx];
   // Tiered warnings: 30%, 50%, 70%, 85%, 95%
   const thresholds = [
-    { pct: 95, urgency: 'critical', msg: `CRITICAL tyre wear! ${worstTyre} at ${maxWear}%. Box box box!` },
-    { pct: 85, urgency: 'high',     msg: `Tyre wear dangerous. ${worstTyre} at ${maxWear}%. Tyre cliff imminent.` },
-    { pct: 70, urgency: 'high',     msg: `High tyre wear. ${worstTyre} at ${maxWear}%. Start thinking about the stop.` },
-    { pct: 50, urgency: 'medium',   msg: `Tyre wear update: ${worstTyre} at ${maxWear}%. Managing the rubber.` },
-    { pct: 30, urgency: 'low',      msg: `Tyre check: ${worstTyre} at ${maxWear}%. Still in the operating window.` },
+    { pct: 95, urgency: 'critical', msg: `CRITICAL tyre wear! ${worstTyre} at ${maxWear}%.`, situation: 'tyre_wear_critical' },
+    { pct: 85, urgency: 'high',     msg: `Tyre wear dangerous. ${worstTyre} at ${maxWear}%. Tyre cliff imminent.`, situation: 'fl_wear_high' },
+    { pct: 70, urgency: 'high',     msg: `High tyre wear. ${worstTyre} at ${maxWear}%.`, situation: 'fl_wear_high' },
+    { pct: 50, urgency: 'medium',   msg: `Tyre wear update: ${worstTyre} at ${maxWear}%.`, situation: 'extending_stint' },
+    { pct: 30, urgency: 'low',      msg: `Tyre check: ${worstTyre} at ${maxWear}%. Still in the operating window.`, situation: 'extending_stint' },
   ];
   for (const t of thresholds) {
     if (maxWear >= t.pct && radio.prev.maxTyreWearReported < t.pct) {
       radio.prev.maxTyreWearReported = t.pct;
-      emitLocalRadio('tyres', t.urgency, t.msg);
+      emitLocalRadio('tyres', t.urgency, t.msg, t.situation);
       break;
     }
   }
@@ -2526,7 +2982,8 @@ function detectTyreWear() {
     const delta = lap.lastLapTimeMs - radio.prev.prevLastLapTime;
     if (delta > 2000 && maxWear > 60) { // 2s+ slower
       emitLocalRadio('tyres', 'critical',
-        RADIO_MESSAGES.tyre_cliff({ tyre: worstTyre, wear: maxWear }).text);
+        RADIO_MESSAGES.tyre_cliff({ tyre: worstTyre, wear: maxWear }).text,
+        'tyre_cliff');
     }
   }
   if (lap) {
@@ -2538,7 +2995,7 @@ function detectTyreWear() {
     radio.prev.maxTyreWearReported = 0;
     const sts = state.status;
     const cmp = sts ? (TYRE_COMPOUNDS[sts.visualTyreCompound]?.name || 'new tyres') : 'new tyres';
-    emitLocalRadio('pit', 'medium', `New ${cmp} fitted. Bring them up to temperature carefully.`);
+    emitLocalRadio('pit', 'medium', `New ${cmp} fitted. Bring them up to temperature carefully.`, 'pit_exit_new_tyres');
   }
   // Tyre overheating detection
   const tel = state.telemetry;
@@ -2548,7 +3005,8 @@ function detectTyreWear() {
     for (let i = 0; i < 4; i++) {
       if (tel.tyreSurfaceTemp[i] > 120 && canTrigger('tyres')) {
         emitLocalRadio('tyres', 'medium',
-          RADIO_MESSAGES.normal_tyre_overheating({ hotTyre: posLabel[i], temp: tel.tyreSurfaceTemp[i] }).text);
+          RADIO_MESSAGES.normal_tyre_overheating({ hotTyre: posLabel[i], temp: tel.tyreSurfaceTemp[i] }).text,
+          'tyres_overheating_dirty');
         break;
       }
     }
@@ -2565,17 +3023,21 @@ function detectFuel() {
   const ses = state.session;
   const lap = state.lapData?.[state.playerCarIndex];
   if (!ses || !lap) return;
-  const lapsLeft = ses.totalLaps - lap.currentLapNum;
-  if (fuelLaps > 0 && lapsLeft > 0 && fuelLaps < lapsLeft && fuelLaps < lapsLeft - 1) {
+  const lapsToFlag = getRemainingRaceDistanceLaps(ses, lap);
+  const fuelDeficit = lapsToFlag - fuelLaps;
+  if (fuelLaps > 0 && lapsToFlag > 0.25 && fuelDeficit >= 0.35) {
     if (!radio.prev.fuelWarned) {
       radio.prev.fuelWarned = true;
       emitLocalRadio('normal', 'high',
-        `Fuel critical. ${fuelLaps.toFixed(1)} laps of fuel remaining, ${lapsLeft} laps to go. Lean mix now.`);
+        `Fuel critical. Estimate ${fuelLaps.toFixed(1)} laps remaining, ${lapsToFlag.toFixed(1)} to the flag. Deficit ${fuelDeficit.toFixed(1)} laps.`,
+        'fuel_critical');
     }
   }
-  if (fuelLaps >= lapsLeft && radio.prev.fuelWarned) {
+  if (fuelDeficit <= 0.1 && radio.prev.fuelWarned) {
     radio.prev.fuelWarned = false;
-    emitLocalRadio('normal', 'low', 'Fuel is fine now. You\'ll make it to the end.');
+    emitLocalRadio('normal', 'low',
+      `Fuel back on target. Estimate ${fuelLaps.toFixed(1)} laps remaining, ${lapsToFlag.toFixed(1)} to the flag.`,
+      'fuel_recovered');
   }
 }
 function detectWeatherChange() {
@@ -2590,14 +3052,16 @@ function detectWeatherChange() {
     const isWet = w >= 3;
     if (isWet && !wasWet) {
       emitLocalRadio('weather', 'critical',
-        RADIO_MESSAGES.weather_rain_starting().text);
+        RADIO_MESSAGES.weather_rain_starting().text,
+        'light_rain_begins');
     } else if (!isWet && wasWet) {
       emitLocalRadio('weather', 'high',
-        RADIO_MESSAGES.weather_drying().text);
+        RADIO_MESSAGES.weather_drying().text,
+        'drying_track');
     } else if (w > radio.prev.weather) {
-      emitLocalRadio('weather', 'high', `Weather worsening: ${name}. Adjust your approach.`);
+      emitLocalRadio('weather', 'high', `Weather worsening: ${name}.`, 'rain_heavier');
     } else {
-      emitLocalRadio('weather', 'medium', `Weather update: ${name}. Conditions changing.`);
+      emitLocalRadio('weather', 'medium', `Weather update: ${name}. Conditions changing.`, 'weather_change');
     }
   }
   radio.prev.weather = w;
@@ -2638,28 +3102,38 @@ function detectDamage() {
     const wingDmg = newDamage.find(d => d.key === 'flw' || d.key === 'frw');
     if (wingDmg && newDamage.length === 1) {
       emitLocalRadio('incident', urgency,
-        RADIO_MESSAGES.incident_wing_damage({ side: wingDmg.side || 'front', pct: wingDmg.pct }).text);
+        RADIO_MESSAGES.incident_wing_damage({ side: wingDmg.side || 'front', pct: wingDmg.pct }).text,
+        'front_wing_damage');
     } else if (newDamage.find(d => d.key === 'fl') && newDamage.length === 1) {
       emitLocalRadio('incident', urgency,
-        RADIO_MESSAGES.incident_floor_damage({ pct: newDamage[0].pct }).text);
+        RADIO_MESSAGES.incident_floor_damage({ pct: newDamage[0].pct }).text,
+        'sidepod_floor_damage');
     } else {
       const list = newDamage.map(d => `${d.label} ${d.pct}%`).join(', ');
-      emitLocalRadio('incident', urgency, `Damage detected! ${list}. Assess the car.`);
+      const situationKey = hasFault ? 'ers_fault' : 'damage_continue';
+      emitLocalRadio('incident', urgency, `Damage detected! ${list}.`, situationKey);
     }
   }
   radio.prev.damageSnapshot = snapshot;
 }
 function detectFlagChanges() {
-  if (!radio.config.flags?.enabled) return;
+  if (!radio.config.flags?.enabled && !radio.config.restart?.enabled && !radio.config.pit?.enabled) return;
   const ses = state.session;
   if (!ses) return;
+  const redFlagPeriods = ses.numRedFlagPeriods || 0;
+  if (redFlagPeriods > (radio.prev.redFlagPeriods || 0)) {
+    emitLocalRadio('flags', 'critical', RADIO_MESSAGES.flag_red().text, 'red_flag');
+  }
+  radio.prev.redFlagPeriods = redFlagPeriods;
   const sc = ses.safetyCarStatus;
   const prevSC = radio.prev.safetyCarStatus;
   if (prevSC !== null && sc !== prevSC) {
-    if (sc === 1) emitLocalRadio('flags', 'critical', RADIO_MESSAGES.flag_sc().text);
-    else if (sc === 2) emitLocalRadio('flags', 'critical', RADIO_MESSAGES.flag_vsc().text);
-    else if (sc === 3 && prevSC >= 1) emitLocalRadio('restart', 'high', RADIO_MESSAGES.restart_sc().text);
-    else if (sc === 0 && prevSC >= 1) emitLocalRadio('restart', 'high', RADIO_MESSAGES.restart_go().text);
+    if (sc !== 0) radio.prev.restartAwaitingLeaderThrottle = false;
+    if (sc === 1) emitLocalRadio('flags', 'critical', RADIO_MESSAGES.flag_sc().text, 'sc_deployed');
+    else if (sc === 2) emitLocalRadio('flags', 'critical', RADIO_MESSAGES.flag_vsc().text, 'vsc_deployed');
+    else if (sc === 3 && prevSC >= 1) emitLocalRadio('restart', 'high', RADIO_MESSAGES.restart_sc().text, 'sc_restart');
+    else if (sc === 0 && prevSC === 2) emitLocalRadio('restart', 'high', RADIO_MESSAGES.restart_vsc_ending().text, 'vsc_ending');
+    else if (sc === 0 && prevSC === 1) radio.prev.restartAwaitingLeaderThrottle = true;
     // Free pit stop opportunity under SC/VSC
     if ((sc === 1 || sc === 2) && radio.config.pit?.enabled) {
       const lap = state.lapData?.[state.playerCarIndex];
@@ -2668,7 +3142,7 @@ function detectFlagChanges() {
         const maxWear = Math.max(...dmg.tyresWear);
         if (maxWear > 30) {
           setTimeout(() => {
-            emitLocalRadio('pit', 'critical', RADIO_MESSAGES.pit_free_stop_sc().text);
+            emitLocalRadio('pit', 'critical', RADIO_MESSAGES.pit_free_stop_sc().text, 'free_stop_sc');
           }, 5000);
         }
       }
@@ -2678,32 +3152,134 @@ function detectFlagChanges() {
   // FIA flags per car
   const sts = state.status;
   if (sts) {
-    const flag = sts.vehicleFiaFlags;
+    const flag = sts.vehicleFiaFlags === -1 ? 0 : sts.vehicleFiaFlags;
     if (flag !== radio.prev.fiaFlag) {
-      if (flag === -1) emitLocalRadio('flags', 'critical', RADIO_MESSAGES.flag_yellow().text);
-      else if (flag === 1) emitLocalRadio('flags', 'high', RADIO_MESSAGES.flag_green().text);
-      else if (flag === 2) emitLocalRadio('flags', 'high', 'Blue flag! Let the faster car through cleanly.');
-      else if (flag === 3) emitLocalRadio('flags', 'critical', RADIO_MESSAGES.flag_red().text);
+      if (flag === 3) emitLocalRadio('flags', 'high', RADIO_MESSAGES.flag_yellow().text, 'yellow_flag');
+      else if (flag === 1) emitLocalRadio('flags', 'high', RADIO_MESSAGES.flag_green().text, 'flag_green');
+      else if (flag === 2) emitLocalRadio('flags', 'high', 'Blue flag! Faster car approaching.', 'blue_flag');
       radio.prev.fiaFlag = flag;
     }
+  }
+}
+function detectRestartRelease() {
+  if (!radio.prev.restartAwaitingLeaderThrottle) return;
+  const ses = state.session;
+  const lap = getPlayerLap();
+  if (!isRaceSession(ses) || !lap || ses.safetyCarStatus !== 0) return;
+  const leaderLap = state.lapData?.find(entry => entry?.carPosition === 1) || lap;
+  const leaderIdx = leaderLap ? state.lapData.indexOf(leaderLap) : state.playerCarIndex;
+  const leaderTelemetry = state.allCarTelemetry?.[leaderIdx] || state.telemetry;
+  if (!leaderTelemetry) return;
+  const leaderThrottle = leaderTelemetry.throttle || 0;
+  const leaderSpeed = leaderTelemetry.speed || 0;
+  if (leaderThrottle < 0.65 || leaderSpeed < 80) return;
+  radio.prev.restartAwaitingLeaderThrottle = false;
+  emitLocalRadio('restart', 'high', RADIO_MESSAGES.restart_go().text, 'restart_green_go', { cooldownKey: 'restart_green_go' });
+}
+function detectNearbyTrafficHazards() {
+  if ((!radio.config.normal?.enabled && !radio.config.flags?.enabled) || !state.lapData || !state.allCarTelemetry || !state.participants) return;
+  const ses = state.session;
+  const lap = getPlayerLap();
+  const myTelemetry = state.telemetry || state.allCarTelemetry?.[state.playerCarIndex];
+  if (!ses || !lap || !myTelemetry || !hasPlayerTrackContext(ses, lap, myTelemetry)) return;
+  if (ses.safetyCarStatus && ses.safetyCarStatus !== 0) return;
+  const myPos = lap.carPosition;
+  const mySpeed = myTelemetry.speed || 0;
+  const playerOnStraight = mySpeed >= 180
+    && (myTelemetry.throttle || 0) >= 0.92
+    && (myTelemetry.brake || 0) <= 0.05
+    && Math.abs(myTelemetry.steer || 0) <= 0.12
+    && lap.pitStatus === 0;
+  let slowCarCall = null;
+  let rejoinCall = null;
+  for (let idx = 0; idx < state.lapData.length; idx++) {
+    if (idx === state.playerCarIndex) continue;
+    const rivalLap = state.lapData[idx];
+    const rivalTelemetry = state.allCarTelemetry[idx];
+    if (!isActiveRunningCar(rivalLap) || !rivalTelemetry || rivalLap.pitStatus >= 1) continue;
+    const aheadMeters = getTrackAheadGapMeters(lap, rivalLap, ses);
+    const rivalName = state.participants.participants?.[idx]?.name || `Car ${idx + 1}`;
+    const rivalSpeed = rivalTelemetry.speed || 0;
+    const rivalThrottle = rivalTelemetry.throttle || 0;
+    const rivalBrake = rivalTelemetry.brake || 0;
+    const rivalSteer = Math.abs(rivalTelemetry.steer || 0);
+    const sameLapWindow = Math.abs((rivalLap.currentLapNum || 0) - (lap.currentLapNum || 0)) <= 1;
+    const rivalRollingSlowOnStraight =
+      rivalBrake <= 0.08 &&
+      rivalSteer <= 0.16 &&
+      (
+        rivalSpeed < 100 ||
+        (rivalThrottle < 0.82 && mySpeed >= rivalSpeed + 30) ||
+        (mySpeed >= 220 && rivalSpeed <= mySpeed - 45)
+      );
+    if (
+      slowCarCall == null &&
+      playerOnStraight &&
+      aheadMeters != null &&
+      sameLapWindow &&
+      aheadMeters >= 35 &&
+      aheadMeters <= 500 &&
+      rivalRollingSlowOnStraight
+    ) {
+      slowCarCall = { distanceMeters: Math.round(aheadMeters / 10) * 10, rivalName };
+    }
+    const wasOffTrack = !!radio.prev.rivalOffTrack[idx];
+    const isOffTrackNow = isTelemetryOffTrack(rivalTelemetry);
+    radio.prev.rivalOffTrack[idx] = isOffTrackNow;
+    if (
+      rejoinCall == null &&
+      wasOffTrack &&
+      !isOffTrackNow &&
+      aheadMeters != null &&
+      aheadMeters > 0 &&
+      aheadMeters <= 500 &&
+      sameLapWindow &&
+      rivalSpeed <= Math.max(mySpeed, 140)
+    ) {
+      rejoinCall = { distanceMeters: Math.round(aheadMeters / 10) * 10, rivalName };
+    }
+  }
+  if (slowCarCall) {
+    emitLocalRadio(
+      'normal',
+      'medium',
+      RADIO_MESSAGES.normal_slower_car_ahead(slowCarCall).text,
+      'slower_car_ahead',
+      { cooldownKey: 'slower_car_ahead' },
+    );
+  }
+  if (rejoinCall) {
+    emitLocalRadio(
+      'flags',
+      'high',
+      RADIO_MESSAGES.flag_rejoining_track(rejoinCall).text,
+      'car_rejoining_track',
+      { cooldownKey: 'car_rejoining_track' },
+    );
   }
 }
 function detectPitStatus() {
   if (!radio.config.pit?.enabled) return;
   const lap = state.lapData?.[state.playerCarIndex];
   if (!lap) return;
+  const sts = state.status;
   const ps = lap.pitStatus;
   const prevPS = radio.prev.pitStatus;
+  const inPitLane = lap.pitLaneTimerActive === 1 || ps === 2 || sts?.pitLimiterStatus === 1;
+  const prevInPitLane = radio.prev.pitLaneActive === 1;
   if (prevPS !== undefined && ps !== prevPS) {
-    if (ps === 1 && prevPS === 0) {
-      emitLocalRadio('pit', 'medium', 'Box box box. Pit entry  stick to the speed limit.');
+    if (ps === 1 && prevPS === 0 && !inPitLane) {
+      emitLocalRadio('pit', 'medium', 'Pit stop confirmed this lap.', 'planned_stop');
     } else if (ps === 0 && prevPS >= 1) {
-      const sts = state.status;
       const cmp = sts ? (TYRE_COMPOUNDS[sts.visualTyreCompound]?.name || '') : '';
-      emitLocalRadio('pit', 'medium', `Good stop. Out on ${cmp || 'new tyres'}. Push hard on the out-lap.`);
+      emitLocalRadio('pit', 'medium', `Good stop. Out on ${cmp || 'new tyres'}.`, 'pit_exit_new_tyres');
     }
   }
+  if (!prevInPitLane && inPitLane) {
+    emitLocalRadio('pit', 'medium', 'Pit lane. Speed limit active.', 'pit_limiter');
+  }
   radio.prev.pitStatus = ps;
+  radio.prev.pitLaneActive = inPitLane ? 1 : 0;
 }
 function detectPenalty() {
   if (!radio.config.penalty?.enabled) return;
@@ -2711,7 +3287,8 @@ function detectPenalty() {
   if (!lap) return;
   if (lap.penalties > 0 && lap.penalties !== radio.prev.penalties) {
     emitLocalRadio('penalty', 'high',
-      RADIO_MESSAGES.penalty_time({ seconds: lap.penalties }).text);
+      RADIO_MESSAGES.penalty_time({ seconds: lap.penalties }).text,
+      'time_penalty');
   }
   radio.prev.penalties = lap.penalties;
 }
@@ -2730,6 +3307,23 @@ function detectPitWindow() {
   const posLabel = ['RL', 'RR', 'FL', 'FR'];
   const worstIdx = dmg.tyresWear.indexOf(Math.max(...dmg.tyresWear));
   const worstTyre = posLabel[worstIdx];
+  const wingDmg = Math.max(dmg.frontLeftWingDamage, dmg.frontRightWingDamage);
+  const hasEngineFail = dmg.engineBlown || dmg.engineSeized;
+  const severeFinishRisk = maxWear >= 90 || wingDmg > 70 || dmg.floorDamage > 70 || hasEngineFail;
+  const isShortRace = ses.totalLaps > 0 && ses.totalLaps <= 8;
+  if (lapsLeft <= 0) return;
+  if (lapsLeft <= 1) {
+    if (severeFinishRisk && canTrigger('pit')) {
+      emitLocalRadio('pit', 'medium', 'Late race. Stay out unless the car is unsafe to reach the flag.', 'late_race_hold_track');
+    }
+    return;
+  }
+  if (isShortRace && lapsLeft <= 2) {
+    if (severeFinishRisk && canTrigger('pit')) {
+      emitLocalRadio('pit', 'medium', 'Short race closing phase. Stay out unless the car will not make the finish.', 'short_race_hold_track');
+    }
+    return;
+  }
   //  Pace loss detection (compare last lap to rolling average) 
   let paceLoss = 0;
   if (lap.lastLapTimeMs > 0 && radio.prev.lapTimeAvg > 0) {
@@ -2751,18 +3345,18 @@ function detectPitWindow() {
   //  Safety car status 
   const sc = ses.safetyCarStatus; // 0=none, 1=full SC, 2=VSC, 3=forming
   //  Severe damage  pit immediately 
-  const wingDmg = Math.max(dmg.frontLeftWingDamage, dmg.frontRightWingDamage);
-  const hasEngineFail = dmg.engineBlown || dmg.engineSeized;
   if ((wingDmg > 50 || dmg.floorDamage > 50 || hasEngineFail) && lapsLeft > 2 && canTrigger('pit')) {
     emitLocalRadio('pit', 'critical',
       hasEngineFail ? 'Engine failure! Box immediately!'
-      : `Severe damage  ${wingDmg > 50 ? 'front wing' : 'floor'} at ${Math.max(wingDmg, dmg.floorDamage)}%. Box immediately.`);
+      : `Severe damage  ${wingDmg > 50 ? 'front wing' : 'floor'} at ${Math.max(wingDmg, dmg.floorDamage)}%. Box immediately.`,
+      'emergency_stop');
     return;
   }
   //  Puncture risk zone (75%+)  box now 
   if (maxWear >= 75 && lapsLeft > 1 && canTrigger('pit')) {
     emitLocalRadio('pit', 'critical',
-      `BOX NOW! ${worstTyre} at ${maxWear}%. Puncture risk territory. Do not stay out.`);
+      `BOX NOW! ${worstTyre} at ${maxWear}%. Puncture risk territory.`,
+      'emergency_stop');
     return;
   }
   //  Safety Car / VSC pit opportunity 
@@ -2771,46 +3365,54 @@ function detectPitWindow() {
       emitLocalRadio('pit', 'critical',
         sc === 1
           ? `Safety car! Tyre wear at ${maxWear}%. Free stop opportunity  box box box!`
-          : `VSC! Tyre wear at ${maxWear}%. Reduced time loss  consider boxing now.`);
+          : `VSC! Tyre wear at ${maxWear}%. Reduced time loss.`,
+        'free_stop_sc');
       return;
     }
     // Even low wear  if we were planning to stop in next 5 laps
     if (ses.pitStopWindowIdealLap > 0 && lap.currentLapNum >= ses.pitStopWindowIdealLap - 3) {
       emitLocalRadio('pit', 'high',
-        `${sc === 1 ? 'Safety car' : 'VSC'}! Near our pit window. Strong opportunity to stop now.`);
+        `${sc === 1 ? 'Safety car' : 'VSC'}! Near our pit window.`,
+        'planned_stop');
       return;
     }
   }
   //  Danger zone (65-74%)  almost always pit 
   if (maxWear >= 65 && lapsLeft > 2 && canTrigger('pit')) {
     emitLocalRadio('pit', 'high',
-      `${worstTyre} at ${maxWear}%. You're in the danger zone. Box this lap or next.`);
+      `${worstTyre} at ${maxWear}%. You're in the danger zone.`,
+      'planned_stop');
     return;
   }
   //  Performance cliff zone (50-64%)  pit if pace drops 
   if (maxWear >= 50 && lapsLeft > 3 && canTrigger('pit')) {
     if (paceLoss >= 0.8) {
       emitLocalRadio('pit', 'high',
-        `Losing ${paceLoss.toFixed(1)}s per lap. Tyres at ${maxWear}%. Performance cliff  box now.`);
+        `Losing ${paceLoss.toFixed(1)}s per lap. Tyres at ${maxWear}%. Performance cliff.`,
+        'planned_stop');
     } else if (paceLoss >= 0.5) {
       emitLocalRadio('pit', 'medium',
-        `Pace dropping  ${paceLoss.toFixed(1)}s off baseline. ${worstTyre} at ${maxWear}%. Pit window open.`);
+        `Pace dropping  ${paceLoss.toFixed(1)}s off baseline. ${worstTyre} at ${maxWear}%. Pit window open.`,
+        'planned_stop');
     } else {
       emitLocalRadio('pit', 'low',
-        `${worstTyre} at ${maxWear}%. Real pit window. Monitor pace  box if lap times drop.`);
+        `${worstTyre} at ${maxWear}%. Real pit window.`,
+        'planned_stop');
     }
     return;
   }
   //  Early degradation (35-49%)  stay out unless pace drops or undercut 
   if (maxWear >= 35 && paceLoss >= 0.6 && lapsLeft > 5 && canTrigger('pit')) {
     emitLocalRadio('pit', 'medium',
-      `Pace loss ${paceLoss.toFixed(1)}s at ${maxWear}% wear. Consider early stop for the undercut.`);
+      `Pace loss ${paceLoss.toFixed(1)}s at ${maxWear}% wear.`,
+      'early_stop');
     return;
   }
   //  Moderate wing damage  pit if pace suffers 
   if (wingDmg > 25 && wingDmg <= 50 && paceLoss >= 0.8 && lapsLeft > 3 && canTrigger('pit')) {
     emitLocalRadio('pit', 'medium',
-      `Wing damage at ${wingDmg}%, costing ${paceLoss.toFixed(1)}s/lap. Consider boxing for repairs.`);
+      `Wing damage at ${wingDmg}%, costing ${paceLoss.toFixed(1)}s/lap.`,
+      'emergency_stop');
     return;
   }
   //  Weather crossover pit 
@@ -2822,8 +3424,9 @@ function detectPitWindow() {
     if (firstOpposite && firstOpposite.timeOffset <= 5) {
       emitLocalRadio('pit', 'high',
         currentWet
-          ? `Track drying in ~${firstOpposite.timeOffset}min. Prefer inters  dry lines will form. Be ready to box.`
-          : `Rain in ~${firstOpposite.timeOffset}min. Prefer inters for better flexibility. Prepare to box.`);
+          ? `Track drying in ~${firstOpposite.timeOffset}min. Pit crossover approaching.`
+          : `Rain in ~${firstOpposite.timeOffset}min. Pit crossover approaching.`,
+        'weather_crossover_pit');
       return;
     }
   }
@@ -2837,10 +3440,12 @@ function detectPitWindow() {
     if (carsAheadPitting >= 5) {
       if (maxWear >= 35 || paceLoss >= 0.5) {
         emitLocalRadio('pit', 'high',
-          `${carsAheadPitting} cars ahead pitting! Tyres at ${maxWear}%. Cover them  box now before you're undercut.`);
+          `${carsAheadPitting} cars ahead pitting! Tyres at ${maxWear}%.`,
+          'undercut_attempt');
       } else {
         emitLocalRadio('pit', 'medium',
-          `${carsAheadPitting} cars ahead pitting. Tyres still OK at ${maxWear}%. Stay out  use the clean track for an overcut.`);
+          `${carsAheadPitting} cars ahead pitting. Tyres still OK at ${maxWear}%.`,
+          'overcut_attempt');
       }
       return;
     }
@@ -2849,7 +3454,8 @@ function detectPitWindow() {
   if ((sc === 1 || sc === 2) && lapsLeft >= 3 && lapsLeft <= 6 && canTrigger('pit')) {
     if (maxWear >= 25) {
       emitLocalRadio('pit', 'critical',
-        `Late ${sc === 1 ? 'Safety Car' : 'VSC'} with ${lapsLeft} laps left! Box for softs  reduced pit loss, fresh rubber for the restart.`);
+        `Late ${sc === 1 ? 'Safety Car' : 'VSC'} with ${lapsLeft} laps left! Reduced pit loss window.`,
+        'late_stop');
       return;
     }
   }
@@ -2859,7 +3465,8 @@ function detectPitWindow() {
       // 1-2 laps: almost never pit
       if (maxWear >= 90 || wingDmg > 60) {
         emitLocalRadio('pit', 'high',
-          `${lapsLeft} lap${lapsLeft > 1 ? 's' : ''} left. ${maxWear >= 90 ? 'Tyres critical' : 'Severe damage'}. Pit only if you can\'t finish safely.`);
+          `${lapsLeft} lap${lapsLeft > 1 ? 's' : ''} left. ${maxWear >= 90 ? 'Tyres critical' : 'Severe damage'}. Pit only if you can\'t finish safely.`,
+          'late_race_hold_track');
       }
       // Otherwise stay out, no message needed
       return;
@@ -2868,10 +3475,12 @@ function detectPitWindow() {
       // 3-5 laps: pit only if pace is terrible or damage
       if (paceLoss >= 1.5 && maxWear >= 50) {
         emitLocalRadio('pit', 'medium',
-          `${lapsLeft} laps to go, losing ${paceLoss.toFixed(1)}s/lap. Tyres at ${maxWear}%. Late stop could recover  but only if you rejoin in clean air.`);
+          `${lapsLeft} laps to go, losing ${paceLoss.toFixed(1)}s/lap. Tyres at ${maxWear}%.`,
+          'late_stop');
       } else if (wingDmg > 35 && paceLoss >= 0.8) {
         emitLocalRadio('pit', 'medium',
-          `Wing damage at ${wingDmg}% with ${lapsLeft} to go. Costing ${paceLoss.toFixed(1)}s/lap. Stay out unless it gets worse.`);
+          `Wing damage at ${wingDmg}% with ${lapsLeft} to go. Costing ${paceLoss.toFixed(1)}s/lap.`,
+          'late_stop');
       }
       return;
     }
@@ -2886,13 +3495,15 @@ function detectPitWindow() {
       // Typical pit stop costs ~22-25s. If gap behind > 25s, it's a free stop
       if (gapBehindMs > 25000) {
         emitLocalRadio('pit', 'high',
-          `Free stop! ${(gapBehindMs / 1000).toFixed(1)}s gap behind. Box now and rejoin without losing position.`);
+          `Free stop! ${(gapBehindMs / 1000).toFixed(1)}s gap behind.`,
+          'rejoin_clean_air');
         return;
       }
       // If gap behind is 18-25s, marginal  might lose 1 position
       if (gapBehindMs > 18000 && maxWear >= 50) {
         emitLocalRadio('pit', 'medium',
-          `Near-free stop. ${(gapBehindMs / 1000).toFixed(1)}s to car behind. May lose one spot but tyre advantage will recover it.`);
+          `Near-free stop. ${(gapBehindMs / 1000).toFixed(1)}s to car behind.`,
+          'rejoin_traffic');
         return;
       }
     }
@@ -2908,31 +3519,30 @@ function detectPitWindow() {
       const gapBehind = state.lapData.find(l => l?.carPosition === myPos + 1)?.deltaToCarAheadMs || 0;
       if (gapBehind > 15000) {
         emitLocalRadio('pit', 'high',
-          `${aheadName} has pitted! Undercut threat. Good gap behind  cover them, box now.`);
+          `${aheadName} has pitted! Undercut threat.`,
+          'undercut_attempt');
       } else {
         emitLocalRadio('pit', 'medium',
-          `${aheadName} has pitted. Undercut possible but you'd rejoin in traffic. Consider staying out for the overcut.`);
+          `${aheadName} has pitted. Rejoin would be in traffic.`,
+          'overcut_attempt');
       }
     }
   }
 }
 //  Battle-aware detection (battery, damage, prolonged following) 
 function detectBattleSituations() {
-  if (!radio.config.racecraft?.enabled && !radio.config.overtake?.enabled && !radio.config.defend?.enabled) return;
-  const lap = state.lapData?.[state.playerCarIndex];
+  if (!radio.config.racecraft?.enabled && !radio.config.overtake?.enabled && !radio.config.defend?.enabled && !radio.config.ers?.enabled) return;
+  const { lap, carAheadLap, carBehindLap, aheadIdx, behindIdx } = getAdjacentRunningCars();
   const sts = state.status;
-  if (!lap || !sts || !state.allCarStatus) return;
+  const tel = state.telemetry;
+  if (!lap || !sts || !state.allCarStatus || !hasPlayerTrackContext(state.session, lap, tel)) return;
   const now = Date.now();
-  const myPos = lap.carPosition;
   const myErsPct = (sts.ersStoreEnergy / 4000000) * 100;
-  // Find car ahead and behind
-  const carAheadLap = state.lapData?.find(l => l?.carPosition === myPos - 1);
-  const carBehindLap = state.lapData?.find(l => l?.carPosition === myPos + 1);
-  const aheadIdx = carAheadLap ? state.lapData.indexOf(carAheadLap) : -1;
-  const behindIdx = carBehindLap ? state.lapData.indexOf(carBehindLap) : -1;
   const gapAheadMs = lap.deltaToCarAheadMs;
   const gapBehindMs = carBehindLap?.deltaToCarAheadMs;
   const currentLapNum = lap.currentLapNum || 0;
+  const aheadTelemetry = aheadIdx >= 0 ? state.allCarTelemetry?.[aheadIdx] : null;
+  const behindTelemetry = behindIdx >= 0 ? state.allCarTelemetry?.[behindIdx] : null;
   //  Track battle duration 
   if (gapAheadMs > 0 && gapAheadMs < 1500 && aheadIdx >= 0) {
     if (radio.prev.battleAheadIdx !== aheadIdx || radio.prev.battleAheadStart === 0) {
@@ -2958,28 +3568,38 @@ function detectBattleSituations() {
   }
   //  Battery delta during battle (no API) 
   const batteryInfoCooldownMs = 45000;
-  if (aheadIdx >= 0 && gapAheadMs > 0 && gapAheadMs < 1500 && now - radio.prev.lastBattleBatteryMsg > batteryInfoCooldownMs) {
+  if (
+    aheadIdx >= 0 &&
+    shouldSpeakBattleBattery(gapAheadMs, tel, aheadTelemetry, carAheadLap, state.session, lap) &&
+    now - radio.prev.lastBattleBatteryMsg > batteryInfoCooldownMs
+  ) {
     const rivalInfo = getRivalBattleInfo(aheadIdx);
     if (rivalInfo) {
       const deltaPct = myErsPct - rivalInfo.ersPct;
       if (shouldEmitBattleBattery('ahead', aheadIdx, deltaPct)) {
         radio.prev.lastBattleBatteryMsg = now;
         markBattleBattery('ahead', aheadIdx, deltaPct);
-        emitLocalRadio('racecraft', 'low',
-          formatBattleBatteryInfo(rivalInfo.name, 'ahead', deltaPct));
+        emitLocalRadio('ers', 'low',
+          formatBattleBatteryInfo(rivalInfo.name, 'ahead', deltaPct),
+          'battery_delta_ahead');
       }
     }
   }
   // Battery delta for car behind
-  if (behindIdx >= 0 && gapBehindMs > 0 && gapBehindMs < 1500 && now - radio.prev.lastBattleBatteryMsg > batteryInfoCooldownMs) {
+  if (
+    behindIdx >= 0 &&
+    shouldSpeakBattleBattery(gapBehindMs, tel, behindTelemetry, carBehindLap, state.session, lap) &&
+    now - radio.prev.lastBattleBatteryMsg > batteryInfoCooldownMs
+  ) {
     const rivalInfo = getRivalBattleInfo(behindIdx);
     if (rivalInfo) {
       const deltaPct = myErsPct - rivalInfo.ersPct;
       if (shouldEmitBattleBattery('behind', behindIdx, deltaPct)) {
         radio.prev.lastBattleBatteryMsg = now;
         markBattleBattery('behind', behindIdx, deltaPct);
-        emitLocalRadio('racecraft', 'low',
-          formatBattleBatteryInfo(rivalInfo.name, 'behind', deltaPct));
+        emitLocalRadio('ers', 'low',
+          formatBattleBatteryInfo(rivalInfo.name, 'behind', deltaPct),
+          'battery_delta_behind');
       }
     }
   }
@@ -3003,8 +3623,9 @@ function detectBattleSituations() {
           tyreAgeInfoSent = true;
           radio.prev.lastBattleDamageMsg = now;
           radio.prev.lastTyreAgeReportLap = currentLapNum;
-          emitLocalRadio('racecraft', 'medium',
-            RADIO_MESSAGES.overtake_tyre_advantage({ rivalName, tyreDeltaLaps: tyreDelta }).text);
+          emitLocalRadio('overtake', 'medium',
+            RADIO_MESSAGES.overtake_tyre_advantage({ rivalName, tyreDeltaLaps: tyreDelta }).text,
+            'tyre_advantage_pass');
         }
       }
     }
@@ -3018,8 +3639,9 @@ function detectBattleSituations() {
           tyreAgeInfoSent = true;
           radio.prev.lastBattleDamageMsg = now;
           radio.prev.lastTyreAgeReportLap = currentLapNum;
-          emitLocalRadio('racecraft', 'high',
-            RADIO_MESSAGES.defend_rival_fresher_tyres({ rivalName, tyreDeltaLaps: tyreDelta }).text);
+          emitLocalRadio('defend', 'high',
+            RADIO_MESSAGES.defend_rival_fresher_tyres({ rivalName, tyreDeltaLaps: tyreDelta }).text,
+            'defend_worn_tyres');
         }
       }
     }
@@ -3033,14 +3655,16 @@ function detectBattleSituations() {
       radio.prev.lastDirtyAirMsg = now;
       if (rivalInfo) {
         emitLocalRadio('normal', 'medium',
-          `Following ${rivalInfo.name} for a while now. Front tyres heating in dirty air. Commit or back off.`);
+          `Following ${rivalInfo.name} for a while now. Front tyres heating in dirty air.`,
+          'dirty_air');
       }
     }
     // After 90s, suggest backing off or trying different approach
     if (battleDuration > 90000 && battleDuration < 95000 && canTrigger('racecraft')) {
       if (rivalInfo) {
         emitLocalRadio('racecraft', 'medium',
-          `Long battle with ${rivalInfo.name}. Destroying the tyres. Consider the undercut if you can't pass.`);
+          `Long battle with ${rivalInfo.name}. Tyre life dropping in the dirty air.`,
+          'dont_sit_dirty_air');
       }
     }
   }
@@ -3051,7 +3675,8 @@ function detectBattleSituations() {
       radio.prev.lastClosingMsg = now;
       const aheadName = state.participants?.participants?.[aheadIdx]?.name || 'car ahead';
       emitLocalRadio('normal', 'low',
-        RADIO_MESSAGES.normal_closing({ aheadName, gapMs: gapAheadMs }).text);
+        RADIO_MESSAGES.normal_closing({ aheadName, gapMs: gapAheadMs }).text,
+        'closing_slower');
     }
   }
   radio.prev.gapAheadPrev = gapAheadMs;
@@ -3061,14 +3686,15 @@ function detectBattleSituations() {
       radio.prev.lastBeingCaughtMsg = now;
       const behindName = state.participants?.participants?.[behindIdx]?.name || 'car behind';
       emitLocalRadio('normal', 'medium',
-        RADIO_MESSAGES.normal_being_caught({ behindName, gapMs: gapBehindMs }).text);
+        RADIO_MESSAGES.normal_being_caught({ behindName, gapMs: gapBehindMs }).text,
+        'being_caught');
     }
   }
   radio.prev.gapBehindPrev = gapBehindMs || 0;
 }
 //  Driving events (lockup / track limits) 
 function detectDrivingEvents() {
-  if (!radio.config.normal?.enabled) return;
+  if (!radio.config.tyres?.enabled && !radio.config.penalty?.enabled) return;
   const tel = state.telemetry;
   if (!tel) return;
   // Lock-up detection: brake > 80% and speed dropping fast
@@ -3077,16 +3703,16 @@ function detectDrivingEvents() {
     if (now - radio.prev.lockupDetected > 30000) {
       // Approximate: if high brake + low speed + lap invalid could indicate lockup
       const lap = state.lapData?.[state.playerCarIndex];
-      if (lap?.currentLapInvalid && canTrigger('normal')) {
+      if (lap?.currentLapInvalid && canTrigger('tyres')) {
         radio.prev.lockupDetected = now;
-        emitLocalRadio('normal', 'medium', RADIO_MESSAGES.normal_lockup().text);
+        emitLocalRadio('tyres', 'medium', RADIO_MESSAGES.normal_lockup().text, 'lockup_flat_spot');
       }
     }
   }
   // Track limits (lap invalid)
   const lap = state.lapData?.[state.playerCarIndex];
-  if (lap?.currentLapInvalid && canTrigger('normal')) {
-    emitLocalRadio('normal', 'medium', RADIO_MESSAGES.normal_track_limits().text);
+  if (lap?.currentLapInvalid && canTrigger('penalty')) {
+    emitLocalRadio('penalty', 'medium', RADIO_MESSAGES.normal_track_limits().text, 'track_limits_warn');
   }
 }
 //  End of race detection 
@@ -3103,11 +3729,12 @@ function detectEndRace() {
   if (lapsLeft === 0 && !radio.prev.endRaceWarned) {
     radio.prev.endRaceWarned = true;
     emitLocalRadio('endrace', 'high',
-      RADIO_MESSAGES.endrace_final_lap({ position: lap.carPosition, gapAheadMs: lap.deltaToCarAheadMs }).text);
+      RADIO_MESSAGES.endrace_final_lap({ position: lap.carPosition, gapAheadMs: lap.deltaToCarAheadMs }).text,
+      'final_lap_overtake');
   }
   // Last 3 laps  full send message
   if (lapsLeft === 3 && canTrigger('endrace')) {
-    emitLocalRadio('endrace', 'medium', RADIO_MESSAGES.endrace_push_no_saving().text);
+    emitLocalRadio('endrace', 'medium', RADIO_MESSAGES.endrace_push_no_saving().text, 'push_no_saving');
   }
   // Reset for next race
   if (lapsLeft > 5) radio.prev.endRaceWarned = false;
@@ -3122,7 +3749,7 @@ function detectCleanAir() {
   // Clean air: gap > 3s to car ahead, and we haven't said this recently
   if (gapAheadMs > 3000 && now - radio.prev.cleanAirMsgTime > 120000) {
     radio.prev.cleanAirMsgTime = now;
-    emitLocalRadio('normal', 'low', RADIO_MESSAGES.normal_clean_air().text);
+    emitLocalRadio('normal', 'low', RADIO_MESSAGES.normal_clean_air().text, 'clean_air');
   }
 }
 //  Proximity-based scenarios (use API for tactical advice) 
@@ -3143,9 +3770,13 @@ function getProximityScenario() {
 }
 async function triggerAPIRadio(scenario) {
   if (radio.awaiting) return;
-  // Check if category is enabled
-  const catKey = getCategoryForRadio(scenario);
-  if (catKey && radio.config[catKey] && !radio.config[catKey].enabled) return;
+  if (isPlayerRaceFinished()) return;
+  const scenarioSituation = scenario === 'attack'
+    ? 'attack_scenario'
+    : scenario === 'defense'
+      ? 'defense_scenario'
+      : 'mixed_scenario';
+  if (!isRadioSituationEnabled(scenario, scenarioSituation)) return;
   radio.awaiting = true;
   markTriggered(scenario);
   const ctx = buildRaceContext(true);
@@ -3172,6 +3803,7 @@ async function triggerAPIRadio(scenario) {
   });
   thinkingCard.remove();
   radio.awaiting = false;
+  if (isPlayerRaceFinished()) return;
   if (result.error || !result.response) {
     // Don't spam the feed with "No API key" errors
     if (result.error?.includes('API key')) return;
@@ -3191,11 +3823,12 @@ async function triggerAPIRadio(scenario) {
 }
 //  Qualifying radio 
 function detectQualifyingRadio() {
+  if (!radio.config.normal?.enabled) return;
   const ses = state.session;
   const lap = state.lapData?.[state.playerCarIndex];
   if (!ses || !lap) return;
   const pitStatus = lap.pitStatus; // 0=none, 1=pitting, 2=in pit
-  const lastLapMs  = lap.lastLapTimeInMS;
+  const lastLapMs  = lap.lastLapTimeMs;
   const allLaps    = state.lapData || [];
   // Detect outlap (just exited pits, driverStatus=5 is out-lap in F1)
   // pitStatus transitions from 1/2  0 means just left pits
@@ -3207,15 +3840,16 @@ function detectQualifyingRadio() {
     const myPos = lap.carPosition;
     const behind = allLaps.find(c => c && c.carPosition === myPos + 1);
     if (behind) {
-      const gapBehind = behind.deltaToCarInFrontInMS / 1000;
+      const gapBehind = behind.deltaToCarAheadMs / 1000;
       if (gapBehind < 8 && gapBehind > 0) {
-        emitLocalRadio('flags', 'medium',
-          `Car behind on your outlap, ${gapBehind.toFixed(1)}s back. Give them room if needed.`);
+        emitLocalRadio('normal', 'medium',
+          `Car behind on your outlap, ${gapBehind.toFixed(1)}s back.`,
+          'outlap_traffic');
       } else {
-        emitLocalRadio('normal', 'low', 'Outlap. Track is clear behind you. Build your tyres.');
+        emitLocalRadio('normal', 'low', 'Outlap. Track is clear behind you.', 'outlap_clear');
       }
     } else {
-      emitLocalRadio('normal', 'low', 'Outlap. Track is clear. Focus on tyre prep.');
+      emitLocalRadio('normal', 'low', 'Outlap. Track is clear.', 'outlap_clear');
     }
   }
   radio.prev.pitStatus = pitStatus;
@@ -3240,7 +3874,7 @@ function detectQualifyingRadio() {
     let msg = `${sessionTypeLabel} lap complete. P${myCarPos}. Your lap: ${myLapStr}`;
     if (deltaStr) msg += `. P1: ${p1LapStr} (${deltaStr})`;
     msg += '. Coming in.';
-    emitLocalRadio('normal', 'medium', msg);
+    emitLocalRadio('normal', 'medium', msg, 'qualifying_lap_complete');
   }
 }
 //  Master auto-radio check (called from RAF tick) 
@@ -3256,6 +3890,7 @@ function checkAutoRadio() {
     detectQualifyingRadio();
     return;  // skip all race-mode checks
   }
+  if (handleFinishedRaceRadioState()) return;
   // All informational/logic-based triggers (no API)
   detectRaceStart();
   detectPositionChange();
@@ -3264,10 +3899,12 @@ function checkAutoRadio() {
   detectWeatherChange();
   detectDamage();
   detectFlagChanges();
+  detectRestartRelease();
   detectPitStatus();
   detectPenalty();
   detectPitWindow();
   detectBattleSituations();
+  detectNearbyTrafficHazards();
   detectDrivingEvents();
   detectEndRace();
   detectCleanAir();
@@ -3413,11 +4050,10 @@ function buildEngineer() {
   function updateGptCreditsLabel() {
     if (!gptCreditsLabel) return;
     if (license.devMode) {
-      gptCreditsLabel.textContent = 'DEV MODE — unlimited';
+      gptCreditsLabel.textContent = 'DEV MODE - unlimited';
     } else {
-      const s = gptRealtime.sessionType === 'qualifying';
-      const n = s ? license.qualifyingRemaining : license.racesRemaining;
-      gptCreditsLabel.textContent = `${n} credit${n !== 1 ? 's' : ''} remaining`;
+      const n = license.creditsRemaining ?? license.racesRemaining ?? 0;
+      gptCreditsLabel.textContent = n + ' credit' + (n !== 1 ? 's' : '') + ' remaining';
     }
   }
   if (aiModeSelect) {
@@ -3588,7 +4224,7 @@ function buildRadioConfig() {
       <div class="radio-config-header">
         <h2>Radio Configuration</h2>
         <p class="radio-config-subtitle">Select which situations the race engineer will speak about. Toggle categories on/off, or expand to control individual situations.
-          Enable <strong>AI</strong> on categories to use GPT Realtime voice (requires GPT mode + race credits).</p>
+          Enable <strong>AI</strong> on categories to use GPT Realtime voice (requires GPT mode + credits).</p>
         <div class="radio-config-actions">
           <button id="radio-enable-all" class="radio-action-btn">Enable All</button>
           <button id="radio-disable-all" class="radio-action-btn secondary">Disable All</button>
@@ -3702,133 +4338,136 @@ function buildRadioConfig() {
 //  Settings page 
 function buildSettings() {
   el('page-settings').innerHTML = `
-    <div style="max-width:540px">
-      <div class="settings-section">
-        <h3>Telemetry Connection</h3>
-        <div class="panel">
-          <div class="panel-body">
-            <div class="settings-field">
-              <label>Listen Port (This Window)</label>
-              <input type="number" class="settings-input" id="listen-port-input" min="1" max="65535" value="${listenPort}">
-            </div>
-            <div class="stat-row"><span class="stat-label">Active port</span><span class="stat-value mono" id="set-listen-port">${listenPort}</span></div>
-            <div class="stat-row"><span class="stat-label">Protocol</span><span class="stat-value">UDP</span></div>
-            <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value" id="set-conn-status">Offline</span></div>
-            <p class="settings-note" style="margin-top:10px">
-              Set the game's UDP Port to the same value as this window. Example: main window on <strong>20777</strong>, popped-out window on <strong>20778</strong>.
-            </p>
-          </div>
-        </div>
-      </div>
-      <div class="settings-section">
-        <h3>Voice / Text-to-Speech</h3>
-        <div class="panel">
-          <div class="panel-body">
-            <div class="settings-field">
-              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-                <input type="checkbox" id="tts-enabled"> Enable Engineer Voice (TTS)
-              </label>
-            </div>
-            <div class="settings-field" style="margin-top:10px">
-              <label>Voice</label>
-              <select class="settings-input" id="tts-voice-select">
-                ${TTS_VOICES.map(v => `<option value="${v.id}">${v.label}</option>`).join('')}
-              </select>
-            </div>
-            <div class="settings-field">
-              <label>Rate <span id="tts-rate-val">1.0</span>x</label>
-              <input type="range" id="tts-rate" min="0.5" max="2" step="0.1" value="1.0" style="width:100%">
-            </div>
-            <button class="settings-save-btn" id="tts-test" style="margin-top:6px">Test Voice</button>
-          </div>
-        </div>
-      </div>
-      <div class="settings-section">
-        <h3>Track Override</h3>
-        <div class="panel">
-          <div class="panel-body">
-            <p class="settings-note" style="margin-bottom:10px">If the game sends an unrecognized track ID, you can manually select the circuit here.</p>
-            <div class="stat-row"><span class="stat-label">Detected Track ID</span><span class="stat-value mono" id="set-detected-track"></span></div>
-            <div class="settings-field" style="margin-top:10px">
-              <label>Manual Track</label>
-              <select class="settings-input" id="manual-track-select">
-                <option value="-1">Auto-detect (use game data)</option>
-              </select>
+    <div class="settings-layout">
+      <div class="settings-column">
+        <div class="settings-section">
+          <h3>Telemetry Connection</h3>
+          <div class="panel">
+            <div class="panel-body">
+              <div class="settings-field">
+                <label>Listen Port (This Window)</label>
+                <input type="number" class="settings-input" id="listen-port-input" min="1" max="65535" value="${listenPort}">
+              </div>
+              <div class="stat-row"><span class="stat-label">Active port</span><span class="stat-value mono" id="set-listen-port">${listenPort}</span></div>
+              <div class="stat-row"><span class="stat-label">Protocol</span><span class="stat-value">UDP</span></div>
+              <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value" id="set-conn-status">Offline</span></div>
+              <p class="settings-note" style="margin-top:10px">
+                Set the game's UDP Port to the same value as this window. Example: main window on <strong>20777</strong>, popped-out window on <strong>20778</strong>.
+              </p>
             </div>
           </div>
         </div>
-      </div>
-      <div class="settings-section">
-        <h3>GPT Realtime Voice — Mode</h3>
-        <div class="panel"><div class="panel-body">
-          <div class="hybrid-mode-cards">
-            <div class="hybrid-card ${license.byokMode ? '' : 'hybrid-card-active'}" id="hybrid-sub-card">
-              <div class="hybrid-card-title">Subscription</div>
-              <div class="hybrid-card-desc">Buy race packs — we handle the OpenAI key. No setup needed.</div>
-              <div class="hybrid-card-stats">
-                <span>Race credits: <strong id="set-race-credits">${license.devMode ? '∞' : license.racesRemaining}</strong></span>
-                <span>Qualifying: <strong id="set-qual-credits">${license.devMode ? '∞' : license.qualifyingRemaining}</strong></span>
-                ${license.devMode ? '<span class="dev-badge">DEV</span>' : ''}
+        <div class="settings-section">
+          <h3>Voice / Text-to-Speech</h3>
+          <div class="panel">
+            <div class="panel-body">
+              <div class="settings-field">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                  <input type="checkbox" id="tts-enabled"> Enable Engineer Voice (TTS)
+                </label>
               </div>
-              <button class="settings-save-btn" id="set-buy-btn" style="background:var(--accent);margin-top:10px;width:100%">Buy Race Packs</button>
-            </div>
-            <div class="hybrid-card ${license.byokMode ? 'hybrid-card-active' : ''}" id="hybrid-byok-card">
-              <div class="hybrid-card-title">BYOK — Use Your Own Key</div>
-              <div class="hybrid-card-desc">Enter your own OpenAI key. You pay OpenAI directly. Free to use in the app.</div>
-              <div class="settings-field" style="margin-top:8px">
-                <input type="password" class="settings-input" id="openai-key-input" placeholder="sk-..." style="font-size:11px"/>
+              <div class="settings-field" style="margin-top:10px">
+                <label>Voice</label>
+                <select class="settings-input" id="tts-voice-select">
+                  ${TTS_VOICES.map(v => `<option value="${v.id}">${v.label}</option>`).join('')}
+                </select>
               </div>
-              <div style="display:flex;gap:6px;margin-top:8px">
-                <button class="settings-save-btn" id="save-openai-key" style="flex:1">Save &amp; Enable BYOK</button>
-                ${license.byokMode ? '<button class="settings-save-btn" id="disable-byok-btn" style="flex:1">Disable BYOK</button>' : ''}
+              <div class="settings-field">
+                <label>Rate <span id="tts-rate-val">1.0</span>x</label>
+                <input type="range" id="tts-rate" min="0.5" max="2" step="0.1" value="1.0" style="width:100%">
               </div>
-              ${license.byokMode ? '<div class="byok-active-badge" style="margin-top:8px">BYOK Active</div>' : ''}
+              <button class="settings-save-btn" id="tts-test" style="margin-top:6px">Test Voice</button>
             </div>
           </div>
-          <div class="stat-row" style="margin-top:10px"><span class="stat-label">Current Mode</span><span class="stat-value mono" id="set-license-mode">${license.byokMode ? 'BYOK (your key)' : license.devMode ? 'Developer (free)' : 'Subscription'}</span></div>
-          <div class="stat-row"><span class="stat-label">Key Status</span><span class="stat-value" id="set-license-status">${getLicenseStatusLabel()}</span></div>
-          <div class="stat-row"><span class="stat-label">Exhausted At</span><span class="stat-value mono" id="set-license-exhausted-at">${license.licenseExhaustedAt ? formatPaymentEventTime(license.licenseExhaustedAt) : '-'}</span></div>
-          <div class="stat-row"><span class="stat-label">Last Issued Key</span><span class="stat-value mono" id="set-last-license-key">${license.lastIssuedLicenseKey || license.licenseKey || '-'}</span></div>
-        </div></div>
-      </div>
-      <div class="settings-section">
-        <h3>Classic AI (Claude Opus) — API Key</h3>
-        <div class="panel"><div class="panel-body">
-          <div class="settings-field">
-            <label>Anthropic API Key</label>
-            <input type="password" class="settings-input" id="api-key-input" placeholder="sk-ant-..." />
+        </div>
+        <div class="settings-section">
+          <h3>Track Override</h3>
+          <div class="panel">
+            <div class="panel-body">
+              <p class="settings-note" style="margin-bottom:10px">If the game sends an unrecognized track ID, you can manually select the circuit here.</p>
+              <div class="stat-row"><span class="stat-label">Detected Track ID</span><span class="stat-value mono" id="set-detected-track"></span></div>
+              <div class="settings-field" style="margin-top:10px">
+                <label>Manual Track</label>
+                <select class="settings-input" id="manual-track-select">
+                  <option value="-1">Auto-detect (use game data)</option>
+                </select>
+              </div>
+            </div>
           </div>
-          <button class="settings-save-btn" id="save-api-key" style="margin-top:8px">Apply Key</button>
-          <p class="settings-note" style="margin-top:6px">Used for Classic AI mode (non-realtime). Get a key at console.anthropic.com.</p>
-        </div></div>
+        </div>
+        <div class="settings-section">
+          <h3>Classic AI (Claude Opus) — API Key</h3>
+          <div class="panel"><div class="panel-body">
+            <div class="settings-field">
+              <label>Anthropic API Key</label>
+              <input type="password" class="settings-input" id="api-key-input" placeholder="sk-ant-..." />
+            </div>
+            <button class="settings-save-btn" id="save-api-key" style="margin-top:8px">Apply Key</button>
+            <p class="settings-note" style="margin-top:6px">Used for Classic AI mode (non-realtime). Get a key at console.anthropic.com.</p>
+          </div></div>
+        </div>
       </div>
-      <div class="settings-section">
-        <h3>Activate License Key</h3>
-        <div class="panel"><div class="panel-body">
-          <p class="settings-note" style="margin-bottom:10px">If you've purchased a race pack and need to activate it on a new machine or after reinstalling, enter your license key (RE-XXXX-XXXX-XXXX) below.</p>
-          ${(license.lastIssuedLicenseKey || license.licenseKey) ? `<div class="stat-row"><span class="stat-label">Last Key</span><span class="stat-value mono" style="font-size:11px;letter-spacing:1px">${license.lastIssuedLicenseKey || license.licenseKey}</span></div>` : ''}
-          <div class="settings-field" style="margin-top:8px">
-            <label>License Key</label>
-            <input type="text" class="settings-input" id="license-key-input" placeholder="RE-XXXX-XXXX-XXXX" maxlength="14" style="letter-spacing:1px;text-transform:uppercase"/>
-          </div>
-          <div style="display:flex;gap:6px;margin-top:8px">
-            <button class="settings-save-btn" id="activate-key-btn" style="flex:1">Activate Key</button>
-            ${license.licenseKey ? '<button class="settings-save-btn" id="deactivate-key-btn" style="flex:1;background:#c0392b">Deactivate This Machine</button>' : ''}
-          </div>
-          <div id="activate-key-result" style="margin-top:8px;font-size:12px"></div>
-        </div></div>
+      <div class="settings-column">
+        <div class="settings-section">
+          <h3>GPT Realtime Voice — Mode</h3>
+          <div class="panel"><div class="panel-body">
+            <div class="hybrid-mode-cards">
+              <div class="hybrid-card ${license.byokMode ? '' : 'hybrid-card-active'}" id="hybrid-sub-card">
+                <div class="hybrid-card-title">Subscription</div>
+                <div class="hybrid-card-desc">Buy credits - we handle the OpenAI key. Each credit covers one race or qualifying session.</div>
+                <div class="hybrid-card-stats">
+                  <span>Credits: <strong id="set-credits-remaining">${license.devMode ? 'Unlimited' : (license.creditsRemaining ?? license.racesRemaining)}</strong></span>
+                  ${license.devMode ? '<span class="dev-badge">DEV</span>' : ''}
+                </div>
+                <button class="settings-save-btn" id="set-buy-btn" style="background:var(--accent);margin-top:10px;width:100%">Buy Credits</button>
+              </div>
+              <div class="hybrid-card ${license.byokMode ? 'hybrid-card-active' : ''}" id="hybrid-byok-card">
+                <div class="hybrid-card-title">BYOK — Use Your Own Key</div>
+                <div class="hybrid-card-desc">Enter your own OpenAI key. You pay OpenAI directly. Free to use in the app.</div>
+                <div class="settings-field" style="margin-top:8px">
+                  <input type="password" class="settings-input" id="openai-key-input" placeholder="sk-..." style="font-size:11px"/>
+                </div>
+                <div style="display:flex;gap:6px;margin-top:8px">
+                  <button class="settings-save-btn" id="save-openai-key" style="flex:1">Save &amp; Enable BYOK</button>
+                  ${license.byokMode ? '<button class="settings-save-btn" id="disable-byok-btn" style="flex:1">Disable BYOK</button>' : ''}
+                </div>
+                ${license.byokMode ? '<div class="byok-active-badge" style="margin-top:8px">BYOK Active</div>' : ''}
+              </div>
+            </div>
+            <div class="stat-row" style="margin-top:10px"><span class="stat-label">Current Mode</span><span class="stat-value mono" id="set-license-mode">${license.byokMode ? 'BYOK (your key)' : license.devMode ? 'Developer (free)' : 'Subscription'}</span></div>
+            <div class="stat-row"><span class="stat-label">Key Status</span><span class="stat-value" id="set-license-status">${getLicenseStatusLabel()}</span></div>
+            <div class="stat-row"><span class="stat-label">Exhausted At</span><span class="stat-value mono" id="set-license-exhausted-at">${license.licenseExhaustedAt ? formatPaymentEventTime(license.licenseExhaustedAt) : '-'}</span></div>
+            <div class="stat-row"><span class="stat-label">Last Issued Key</span><span class="stat-value mono" id="set-last-license-key">${license.lastIssuedLicenseKey || license.licenseKey || '-'}</span></div>
+          </div></div>
+        </div>
+        <div class="settings-section">
+          <h3>Activate License Key</h3>
+          <div class="panel"><div class="panel-body">
+            <p class="settings-note" style="margin-bottom:10px">If you've purchased a credit pack and need to activate it on a new machine or after reinstalling, enter your license key (RE-XXXX-XXXX-XXXX) below.</p>
+            ${(license.lastIssuedLicenseKey || license.licenseKey) ? `<div class="stat-row"><span class="stat-label">Last Key</span><span class="stat-value mono" style="font-size:11px;letter-spacing:1px">${license.lastIssuedLicenseKey || license.licenseKey}</span></div>` : ''}
+            <div class="settings-field" style="margin-top:8px">
+              <label>License Key</label>
+              <input type="text" class="settings-input" id="license-key-input" placeholder="RE-XXXX-XXXX-XXXX" maxlength="14" style="letter-spacing:1px;text-transform:uppercase"/>
+            </div>
+            <div style="display:flex;gap:6px;margin-top:8px">
+              <button class="settings-save-btn" id="activate-key-btn" style="flex:1">Activate Key</button>
+              ${license.licenseKey ? '<button class="settings-save-btn" id="deactivate-key-btn" style="flex:1;background:#c0392b">Deactivate This Machine</button>' : ''}
+            </div>
+            <div id="activate-key-result" style="margin-top:8px;font-size:12px"></div>
+          </div></div>
+        </div>
+        <div class="settings-section">
+          <h3>Payment Status & Logs</h3>
+          <div class="panel"><div class="panel-body">
+            <div class="stat-row">
+              <span class="stat-label">Recent Events</span>
+              <span class="stat-value" id="set-payment-log-empty">${Array.isArray(license.paymentEvents) && license.paymentEvents.length > 0 ? '' : 'No payment events yet.'}</span>
+            </div>
+            <div id="set-payment-log-list" class="payment-log-list"></div>
+          </div></div>
+        </div>
       </div>
-      <div class="settings-section">
-        <h3>Payment Status & Logs</h3>
-        <div class="panel"><div class="panel-body">
-          <div class="stat-row">
-            <span class="stat-label">Recent Events</span>
-            <span class="stat-value" id="set-payment-log-empty">${Array.isArray(license.paymentEvents) && license.paymentEvents.length > 0 ? '' : 'No payment events yet.'}</span>
-          </div>
-          <div id="set-payment-log-list" class="payment-log-list"></div>
-        </div></div>
-      </div>
-      <div class="settings-section">
+      <div class="settings-section settings-section-actions">
         <div style="display:flex;gap:8px;align-items:center">
           <button class="settings-save-btn" id="save-all-settings" style="background:var(--accent)">Save All Settings</button>
         </div>
@@ -3890,7 +4529,7 @@ function buildSettings() {
     } else {
       Object.assign(license, result.license);
       resultEl.style.color = 'var(--green)';
-      resultEl.textContent = `✓ Activated! +${result.packCount} ${result.packType} credit${result.packCount !== 1 ? 's' : ''} added.`;
+      resultEl.textContent = `? Activated! ${result.packCount} credit${result.packCount !== 1 ? 's' : ''} synced.`;
       setTimeout(() => buildSettings(), 2000);
     }
   });
@@ -4029,10 +4668,9 @@ async function init() {
     listenPort = normalizeListenPort(saved.telemetryPort);
   }
   if (saved.radioConfig) {
-    // Merge saved config into default (new categories added after save still get defaults)
-    for (const [cat, val] of Object.entries(saved.radioConfig)) {
-      if (radio.config[cat] != null) radio.config[cat] = val;
-    }
+    radio.config = normalizeRadioConfig(saved.radioConfig);
+  } else {
+    radio.config = normalizeRadioConfig(radio.config);
   }
   if (saved.openaiApiKey) gptRealtime.openaiApiKey = saved.openaiApiKey;
   if (saved.gptVoice) gptRealtime.voice = saved.gptVoice;
@@ -4068,6 +4706,10 @@ async function init() {
     buildEngineer();
     buildRadioConfig();
     buildSettings();
+  }
+  if (!DETACH_PAGE) {
+    clearTelemetryStateCache();
+    window.raceEngineer.stopTelemetry();
   }
   refreshLicenseBadges();
   // Nav routing
@@ -4110,6 +4752,8 @@ async function init() {
   });
   window.raceEngineer.onTelemetryStopped(() => {
     state.connected = false;
+    clearTelemetryStateCache();
+    resetTelemetryPanels();
     const dot = el('connection-dot');
     if (dot) dot.className = 'conn-dot offline';
     const label = el('connection-label');
@@ -4124,6 +4768,8 @@ async function init() {
   });
   window.raceEngineer.onTelemetryError((data) => {
     state.connected = false;
+    clearTelemetryStateCache();
+    resetTelemetryPanels();
     const dot = el('connection-dot');
     if (dot) dot.className = 'conn-dot offline';
     const label = el('connection-label');
@@ -4154,12 +4800,14 @@ async function init() {
     state.fastestLapCar = d.vehicleIdx;
     state.fastestLapMs  = d.lapTimeMs;
   });
-  // Restore best laps and fastest lap from state snapshot (for new windows)
-  const snap = await window.raceEngineer.getStateSnapshot();
-  if (snap.bestLapTimes) state.bestLapTimes = snap.bestLapTimes;
-  if (snap.fastestLap) {
-    state.fastestLapCar = snap.fastestLap.vehicleIdx;
-    state.fastestLapMs  = snap.fastestLap.lapTimeMs;
+  // Detached child windows inherit an existing telemetry context from the source window.
+  if (DETACH_PAGE) {
+    const snap = await window.raceEngineer.getStateSnapshot();
+    if (snap.bestLapTimes) state.bestLapTimes = snap.bestLapTimes;
+    if (snap.fastestLap) {
+      state.fastestLapCar = snap.fastestLap.vehicleIdx;
+      state.fastestLapMs  = snap.fastestLap.lapTimeMs;
+    }
   }
   // GPT Realtime IPC listeners (audio + transcript + status)
   window.raceEngineer.onGptAudioChunk((d) => {

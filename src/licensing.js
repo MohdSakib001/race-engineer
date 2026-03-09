@@ -11,7 +11,7 @@ import os from 'node:os';
  *     No credits consumed. They pay OpenAI directly.
  *
  *   Mode B — Subscription (your key):
- *     User buys race packs via PayPal (hosted page).
+ *     User buys AI Engineer credit packs via PayPal (hosted page).
  *     Your OPENAI_API_KEY (env var) is used server-side in main process.
  *     Credits are granted after PayPal payment capture.
  *
@@ -53,9 +53,9 @@ export const WORKER_ADMIN_SECRET = _env.WORKER_ADMIN_SECRET || '';
 
 // ── Pricing constants ─────────────────────────────────────────────────────────
 const COST_PER_RACE_MINUTE_USD = 0.0125; // after 2.5× markup on OpenAI cost
-const QUALIFYING_MINUTES_SHORT = 18;
-const QUALIFYING_MINUTES_FULL  = 60;
+const PACK_PRICE_UPLIFT = 1.10;
 const MIN_PACK_PRICE_USD = 0.99;
+const DEV_SESSION_CREDITS = 999;
 const ZERO_DECIMAL_CURRENCIES = new Set(['HUF', 'JPY', 'TWD']);
 
 const FALLBACK_USD_FX_RATES = {
@@ -229,7 +229,7 @@ function estimateCostUSD(raceMinutes, activeSituations) {
 }
 
 /**
- * Generate race pack options with pricing.
+ * Generate shared credit pack options with pricing.
  * @param {{ raceLaps, racePercent, activeSituations }} opts
  */
 export function generateRacePacks(opts = {}) {
@@ -239,19 +239,15 @@ export function generateRacePacks(opts = {}) {
   const costPerRace = estimateCostUSD(raceMin, activeSituations);
 
   const packs = [
-    { id: 'race_1',     type: 'race',       count: 1,  label: '1 Race',                   discount: 0,    minutes: raceMin },
-    { id: 'race_2',     type: 'race',       count: 2,  label: '2 Races',                  discount: 0.05, minutes: raceMin },
-    { id: 'race_5',     type: 'race',       count: 5,  label: '5 Races',                  discount: 0.10, minutes: raceMin },
-    { id: 'race_10',    type: 'race',       count: 10, label: '10 Races',                 discount: 0.15, minutes: raceMin },
-    { id: 'qual_short', type: 'qualifying', count: 1,  label: 'Qualifying — Short Q',     discount: 0,    minutes: QUALIFYING_MINUTES_SHORT },
-    { id: 'qual_full',  type: 'qualifying', count: 1,  label: 'Qualifying — Full Q',      discount: 0,    minutes: QUALIFYING_MINUTES_FULL  },
+    { id: 'race_1',  type: 'session', count: 1,  label: '1 Credit',  discount: 0,    minutes: raceMin },
+    { id: 'race_2',  type: 'session', count: 2,  label: '2 Credits', discount: 0.05, minutes: raceMin },
+    { id: 'race_5',  type: 'session', count: 5,  label: '5 Credits', discount: 0.10, minutes: raceMin },
+    { id: 'race_10', type: 'session', count: 10, label: '10 Credits', discount: 0.15, minutes: raceMin },
   ];
 
   return packs.map(p => {
-    const baseCost = p.type === 'qualifying'
-      ? estimateCostUSD(p.minutes, activeSituations)
-      : costPerRace * p.count;
-    const priceUSD = Math.max(baseCost * (1 - p.discount), MIN_PACK_PRICE_USD);
+    const baseCost = costPerRace * p.count;
+    const priceUSD = Math.max(baseCost * (1 - p.discount) * PACK_PRICE_UPLIFT, MIN_PACK_PRICE_USD);
     const convertedPrice = usdToCurrency(priceUSD, selectedCurrency);
     const perRacePrice = p.count > 1 ? toCurrencyAmount(convertedPrice / p.count, selectedCurrency) : null;
     return {
@@ -260,13 +256,14 @@ export function generateRacePacks(opts = {}) {
       currencyCode: selectedCurrency,
       priceAmount: convertedPrice,
       priceDisplay: formatCurrency(convertedPrice, selectedCurrency),
-      perRaceDisplay: p.count > 1 ? `${formatCurrency(perRacePrice, selectedCurrency)}/race` : null,
+      perRaceDisplay: p.count > 1 ? `${formatCurrency(perRacePrice, selectedCurrency)}/credit` : null,
     };
   });
 }
 
 // ── License store ─────────────────────────────────────────────────────────────
 const DEFAULT_LICENSE = {
+  creditsRemaining: 0,
   racesRemaining: 0,
   qualifyingRemaining: 0,
   devMode: false,
@@ -279,6 +276,47 @@ const DEFAULT_LICENSE = {
   lastIssuedLicenseKey: null,
 };
 
+function parsePurchaseCount(purchase = {}) {
+  const explicit = Number(purchase?.count);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit);
+  const packId = String(purchase?.packId || '').trim().toLowerCase();
+  const matched = packId.match(/(?:race|credit|session)_(\d+)/);
+  if (matched) return Math.max(0, Number.parseInt(matched[1], 10) || 0);
+  if (packId === 'qual_short' || packId === 'qual_full') return 1;
+  return 0;
+}
+
+function getPurchaseCreditUpperBound(purchases = []) {
+  if (!Array.isArray(purchases)) return 0;
+  return purchases.reduce((sum, purchase) => sum + parsePurchaseCount(purchase), 0);
+}
+
+export function getResolvedCreditsRemaining(value = {}) {
+  const explicit = Number(value?.creditsRemaining);
+  if (Number.isFinite(explicit)) return Math.max(0, Math.floor(explicit));
+
+  const race = Number(value?.racesRemaining);
+  const qualifying = Number(value?.qualifyingRemaining);
+  const hasRace = Number.isFinite(race);
+  const hasQualifying = Number.isFinite(qualifying);
+
+  if (hasRace && hasQualifying) {
+    if (race === qualifying) return Math.max(0, Math.floor(race));
+    return Math.max(0, Math.floor(race + qualifying));
+  }
+  if (hasRace) return Math.max(0, Math.floor(race));
+  if (hasQualifying) return Math.max(0, Math.floor(qualifying));
+  return 0;
+}
+
+export function applySharedCreditAliases(target = {}, credits = getResolvedCreditsRemaining(target)) {
+  const normalizedCredits = Math.max(0, Math.floor(Number(credits) || 0));
+  target.creditsRemaining = normalizedCredits;
+  target.racesRemaining = normalizedCredits;
+  target.qualifyingRemaining = normalizedCredits;
+  return target;
+}
+
 function stripStaleDevLicenseState(license = {}) {
   const cleaned = { ...license };
   if (isDevMode()) return cleaned;
@@ -287,22 +325,35 @@ function stripStaleDevLicenseState(license = {}) {
   cleaned.devMode = false;
   const activeKey = String(cleaned.licenseKey || '').trim().toUpperCase();
   const lastKey = String(cleaned.lastIssuedLicenseKey || '').trim().toUpperCase();
+  const legacyRace = Math.max(0, Number(cleaned.racesRemaining || 0));
+  const legacyQualifying = Math.max(0, Number(cleaned.qualifyingRemaining || 0));
+  const legacyTotal = legacyRace + legacyQualifying;
+  const purchaseUpperBound = getPurchaseCreditUpperBound(cleaned.purchases);
+  const hasExplicitCredits = Number.isFinite(Number(cleaned.creditsRemaining));
 
   if (hadPersistedDevMode && !activeKey) {
-    cleaned.racesRemaining = 0;
-    cleaned.qualifyingRemaining = 0;
+    applySharedCreditAliases(cleaned, 0);
     cleaned.machineId = null;
   }
 
   if (activeKey.startsWith('RE-DEV-')) {
     cleaned.licenseKey = null;
     cleaned.machineId = null;
-    cleaned.racesRemaining = 0;
-    cleaned.qualifyingRemaining = 0;
+    applySharedCreditAliases(cleaned, 0);
   }
 
   if (!cleaned.licenseKey && lastKey.startsWith('RE-DEV-')) {
     cleaned.lastIssuedLicenseKey = null;
+  }
+
+  if (!hasExplicitCredits && activeKey && !activeKey.startsWith('RE-DEV-')) {
+    const suspiciousLegacyCredits = legacyRace >= DEV_SESSION_CREDITS
+      || legacyQualifying >= DEV_SESSION_CREDITS
+      || legacyTotal > 500
+      || (purchaseUpperBound > 0 && legacyTotal > purchaseUpperBound);
+    if (suspiciousLegacyCredits) {
+      applySharedCreditAliases(cleaned, purchaseUpperBound > 0 ? purchaseUpperBound : 0);
+    }
   }
 
   return cleaned;
@@ -312,7 +363,7 @@ function deriveLicenseStatus(license) {
   if (license.devMode || isDevMode()) return 'dev';
   if (license.byokMode) return 'byok';
   if (!license.licenseKey) return 'no-key';
-  if ((license.racesRemaining || 0) <= 0 && (license.qualifyingRemaining || 0) <= 0) return 'exhausted';
+  if ((license.creditsRemaining || 0) <= 0) return 'exhausted';
   return 'active';
 }
 
@@ -321,6 +372,16 @@ function normalizeLicenseShape(license = {}) {
   if (!Array.isArray(merged.purchases)) merged.purchases = [];
   if (!Array.isArray(merged.paymentEvents)) merged.paymentEvents = [];
   if (!Array.isArray(merged.processedOrderIds)) merged.processedOrderIds = [];
+  if (merged.devMode || isDevMode()) {
+    applySharedCreditAliases(merged, DEV_SESSION_CREDITS);
+  } else {
+    const credits = getResolvedCreditsRemaining(merged);
+    const purchaseUpperBound = getPurchaseCreditUpperBound(merged.purchases);
+    const resolvedCredits = purchaseUpperBound > 0 && merged.licenseKey && !String(merged.licenseKey || '').startsWith('RE-DEV-')
+      ? Math.min(credits, purchaseUpperBound)
+      : credits;
+    applySharedCreditAliases(merged, resolvedCredits);
+  }
 
   const status = deriveLicenseStatus(merged);
   merged.licenseStatus = status;
@@ -362,35 +423,27 @@ export function hasCredits(license, sessionType = 'race') {
   if (license.devMode || isDevMode()) return true;
   if (license.byokMode) return true; // BYOK: user pays OpenAI directly
   if (!license.licenseKey) return false;
-  return sessionType === 'qualifying'
-    ? license.qualifyingRemaining > 0
-    : license.racesRemaining > 0;
+  return (license.creditsRemaining || 0) > 0;
 }
 
 export function consumeCredit(license, sessionType = 'race') {
   // BYOK and dev mode don't consume credits
   if (license.devMode || isDevMode() || license.byokMode) return license;
   const updated = { ...license };
-  if (sessionType === 'qualifying') {
-    updated.qualifyingRemaining = Math.max(0, updated.qualifyingRemaining - 1);
-  } else {
-    updated.racesRemaining = Math.max(0, updated.racesRemaining - 1);
-  }
-  return updated;
+  const nextCredits = Math.max(0, getResolvedCreditsRemaining(updated) - 1);
+  return applySharedCreditAliases(updated, nextCredits);
 }
 
 export function applyPurchase(license, pack, txId, meta = {}) {
   const updated = normalizeLicenseShape({ ...license });
-  if (pack.type === 'qualifying') {
-    updated.qualifyingRemaining = (updated.qualifyingRemaining || 0) + pack.count;
-  } else {
-    updated.racesRemaining = (updated.racesRemaining || 0) + pack.count;
-  }
+  applySharedCreditAliases(updated, getResolvedCreditsRemaining(updated) + Math.max(0, Number(pack?.count) || 0));
   updated.purchases = [
     ...(updated.purchases || []),
     {
       date: new Date().toISOString(),
       packId: pack.id,
+      count: Math.max(0, Number(pack?.count) || 0),
+      type: pack.type || 'session',
       amount: meta.amount || pack.priceDisplay,
       txId,
       provider: meta.provider || null,
@@ -874,26 +927,28 @@ export async function registerLicenseKey(licenseKey, pack, stripeTxId) {
 export async function activateLicenseKey(licenseKey, machineId, machineLabel) {
   if (isDevMode() || licenseKey.startsWith('RE-DEV-')) {
     const parts = licenseKey.split('-');
-    const packType = parts[2]?.toLowerCase() === 'qual' ? 'qualifying' : 'race';
-    const packCount = parseInt(parts[3] || '1') || 1;
+    const packCount = parseInt(parts[3] || parts[2] || '1', 10) || 1;
     return {
       success: true,
-      packType,
+      packType: 'session',
       packCount,
-      packId: `dev_${packType}`,
+      packId: 'dev_session',
       mode: 'dev',
-      racesRemaining: 999,
-      qualifyingRemaining: 999,
+      creditsRemaining: DEV_SESSION_CREDITS,
+      racesRemaining: DEV_SESSION_CREDITS,
+      qualifyingRemaining: DEV_SESSION_CREDITS,
       exhausted: false,
     };
   }
   const result = await workerPost('/activate', { licenseKey, machineId, machineLabel });
   if (result.error) return { success: false, error: result.error };
+  const creditsRemaining = getResolvedCreditsRemaining(result);
   return {
     success: true,
     ...result,
-    racesRemaining: Number.isFinite(result.racesRemaining) ? Number(result.racesRemaining) : undefined,
-    qualifyingRemaining: Number.isFinite(result.qualifyingRemaining) ? Number(result.qualifyingRemaining) : undefined,
+    creditsRemaining,
+    racesRemaining: creditsRemaining,
+    qualifyingRemaining: creditsRemaining,
   };
 }
 
@@ -905,18 +960,28 @@ export async function activateLicenseKey(licenseKey, machineId, machineLabel) {
 export async function validateLicenseKey(licenseKey, machineId) {
   if (isDevMode() || licenseKey.startsWith('RE-DEV-')) {
     const parts = licenseKey.split('-');
-    const packType = parts[2]?.toLowerCase() === 'qual' ? 'qualifying' : 'race';
-    const packCount = parseInt(parts[3] || '1') || 1;
+    const packCount = parseInt(parts[3] || parts[2] || '1', 10) || 1;
     return {
       valid: true,
-      packType,
+      packType: 'session',
       packCount,
-      racesRemaining: 999,
-      qualifyingRemaining: 999,
+      creditsRemaining: DEV_SESSION_CREDITS,
+      racesRemaining: DEV_SESSION_CREDITS,
+      qualifyingRemaining: DEV_SESSION_CREDITS,
       exhausted: false,
     };
   }
-  return workerPost('/validate', { licenseKey, machineId });
+  const result = await workerPost('/validate', { licenseKey, machineId });
+  if (result?.valid === true) {
+    const creditsRemaining = getResolvedCreditsRemaining(result);
+    return {
+      ...result,
+      creditsRemaining,
+      racesRemaining: creditsRemaining,
+      qualifyingRemaining: creditsRemaining,
+    };
+  }
+  return result;
 }
 
 /**
@@ -925,9 +990,35 @@ export async function validateLicenseKey(licenseKey, machineId) {
  */
 export async function consumeLicenseKeyCredit(licenseKey, machineId, sessionType = 'race') {
   if (isDevMode() || String(licenseKey || '').startsWith('RE-DEV-')) {
-    return { success: true, racesRemaining: 999, qualifyingRemaining: 999, exhausted: false, mode: 'dev' };
+    return {
+      success: true,
+      creditsRemaining: DEV_SESSION_CREDITS,
+      racesRemaining: DEV_SESSION_CREDITS,
+      qualifyingRemaining: DEV_SESSION_CREDITS,
+      exhausted: false,
+      mode: 'dev',
+    };
   }
-  return workerPost('/consume', { licenseKey, machineId, sessionType });
+  const result = await workerPost('/consume', { licenseKey, machineId, sessionType });
+  if (result?.success) {
+    const creditsRemaining = getResolvedCreditsRemaining(result);
+    return {
+      ...result,
+      creditsRemaining,
+      racesRemaining: creditsRemaining,
+      qualifyingRemaining: creditsRemaining,
+    };
+  }
+  if (result && (Number.isFinite(Number(result?.racesRemaining)) || Number.isFinite(Number(result?.qualifyingRemaining)) || Number.isFinite(Number(result?.creditsRemaining)))) {
+    const creditsRemaining = getResolvedCreditsRemaining(result);
+    return {
+      ...result,
+      creditsRemaining,
+      racesRemaining: creditsRemaining,
+      qualifyingRemaining: creditsRemaining,
+    };
+  }
+  return result;
 }
 
 /**
@@ -935,9 +1026,26 @@ export async function consumeLicenseKeyCredit(licenseKey, machineId, sessionType
  */
 export async function refundLicenseKeyCredit(licenseKey, machineId, sessionType = 'race') {
   if (isDevMode() || String(licenseKey || '').startsWith('RE-DEV-')) {
-    return { success: true, racesRemaining: 999, qualifyingRemaining: 999, exhausted: false, mode: 'dev' };
+    return {
+      success: true,
+      creditsRemaining: DEV_SESSION_CREDITS,
+      racesRemaining: DEV_SESSION_CREDITS,
+      qualifyingRemaining: DEV_SESSION_CREDITS,
+      exhausted: false,
+      mode: 'dev',
+    };
   }
-  return workerPost('/refund', { licenseKey, machineId, sessionType });
+  const result = await workerPost('/refund', { licenseKey, machineId, sessionType });
+  if (result?.success) {
+    const creditsRemaining = getResolvedCreditsRemaining(result);
+    return {
+      ...result,
+      creditsRemaining,
+      racesRemaining: creditsRemaining,
+      qualifyingRemaining: creditsRemaining,
+    };
+  }
+  return result;
 }
 
 /**
@@ -959,9 +1067,8 @@ export async function attachLicenseKeyToPayment(sessionId, licenseKey, pack) {
 export async function lookupLicenseKey(licenseKey) {
   if (isDevMode() || licenseKey.startsWith('RE-DEV-')) {
     const parts = licenseKey.split('-');
-    const type  = parts[2]?.toLowerCase() === 'qual' ? 'qualifying' : 'race';
-    const count = parseInt(parts[3] || '1') || 1;
-    return { found: true, paid: true, packType: type, packCount: count, packId: `dev_${type}`, txId: licenseKey };
+    const count = parseInt(parts[3] || parts[2] || '1', 10) || 1;
+    return { found: true, paid: true, packType: 'session', packCount: count, packId: 'dev_session', txId: licenseKey };
   }
   // Delegate to Worker activate (which also validates)
   return { found: false, error: 'Use activateLicenseKey() instead.' };

@@ -1,8 +1,8 @@
-﻿import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 // Env vars are injected at build time via vite.main.config.mjs `define`.
-// No runtime dotenv needed — process.env.X is replaced with literal values during build.
+// No runtime dotenv needed � process.env.X is replaced with literal values during build.
 
 import dgram from 'node:dgram';
 import started from 'electron-squirrel-startup';
@@ -35,12 +35,14 @@ import {
   refundLicenseKeyCredit,
   deactivateLicenseKey,
   getMachineId,
+  getResolvedCreditsRemaining,
+  applySharedCreditAliases,
   YOUR_APP_OPENAI_KEY,
 } from './licensing.js';
 
 if (started) app.quit();
 
-// Single instance lock — required for Windows deep links
+// Single instance lock � required for Windows deep links
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 
@@ -48,23 +50,23 @@ if (!gotLock) app.quit();
 // Fallback to HTTPS over TCP for all Electron network traffic.
 app.commandLine.appendSwitch('disable-quic');
 
-// â”€â”€â”€ Multi-window management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Multi-window management ────────────────────────────────────────────────
 const allWindows = new Set();
 
-// â”€â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Constants ────────────────────────────────────────────────────────────────
 const DEFAULT_TELEMETRY_PORT = 20777;
 const PACKET_HEADER_SIZE = 29;
 const MAX_CARS = 22;
 
-// Bytes per car in each packet type (F1 25 â€” verified against official spec)
+// Bytes per car in each packet type (F1 25 — verified against official spec)
 const LAP_DATA_SIZE      = 57;  // 57 bytes/car, unchanged
 const CAR_TELEMETRY_SIZE = 60;  // 60 bytes/car, unchanged
 const CAR_STATUS_SIZE    = 55;  // 55 bytes/car, unchanged
-const CAR_DAMAGE_SIZE    = 46;  // 46 bytes/car (was 40; brakesDamageâ†’[4], +tyreBlisters[4], +engineBlown/Seized)
-const PARTICIPANT_SIZE   = 57;  // 57 bytes/car (was 60; nameâ†’32 chars, +myTeam, +techLevel, +liveryColours)
+const CAR_DAMAGE_SIZE    = 46;  // 46 bytes/car (was 40; brakesDamage→[4], +tyreBlisters[4], +engineBlown/Seized)
+const PARTICIPANT_SIZE   = 57;  // 57 bytes/car (was 60; name→32 chars, +myTeam, +techLevel, +liveryColours)
 const LAP_HISTORY_SIZE   = 14;  // 14 bytes per LapHistoryData entry
 
-// â”€â”€â”€ Session / track lookups â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Session / track lookups ──────────────────────────────────────────────────
 const TRACK_NAMES = {
   0: 'Melbourne', 1: 'Paul Ricard', 2: 'Shanghai', 3: 'Bahrain',
   4: 'Catalunya', 5: 'Monaco', 6: 'Montreal', 7: 'Silverstone',
@@ -103,7 +105,7 @@ const TEAM_COLORS = {
   253: '#FFFFFF', // My Team
 };
 
-// Visual tyre compound â†’ badge display (what the game shows on screen)
+// Visual tyre compound → badge display (what the game shows on screen)
 const TYRE_COMPOUNDS = {
   16: { label: 'S', name: 'Soft',         color: '#FF3333' },
   17: { label: 'M', name: 'Medium',       color: '#FFD700' },
@@ -112,13 +114,13 @@ const TYRE_COMPOUNDS = {
   8:  { label: 'W', name: 'Wet',          color: '#4477FF' },
 };
 
-// Actual tyre compound â†’ C-designation (F1 25 specific)
+// Actual tyre compound → C-designation (F1 25 specific)
 const ACTUAL_COMPOUNDS = {
   16: 'C5', 17: 'C4', 18: 'C3', 19: 'C2', 20: 'C1', 21: 'C0', 22: 'C6',
   7: 'Inter', 8: 'Wet', 9: 'Dry', 10: 'Wet',
 };
 
-// â”€â”€â”€ App State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── App State ────────────────────────────────────────────────────────────────
 const telemetryContexts = new Map(); // port -> context
 const windowPortMap = new Map(); // webContents.id -> port
 let manualTrackId = null;
@@ -136,7 +138,7 @@ function createTelemetryState() {
     fastestLap: null,
   };
 }
-// â”€â”€â”€ Electron Setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Electron Setup ───────────────────────────────────────────────────────────
 let mainWindow;
 let checkoutWindow = null;
 let anthropic = null;
@@ -268,7 +270,7 @@ async function openPayPalCheckoutWindow(url) {
   checkoutWindow.focus();
 }
 
-// â”€â”€â”€ Packet Parsing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Packet Parsing ───────────────────────────────────────────────────────────
 function parseHeader(msg) {
   // F1 25 header: PacketFormat(2) + GameYear(1) + MajorVer(1) + MinorVer(1) + PacketVer(1) + PacketType(1) + ...
   // PacketType is at byte 6, PlayerCarIndex at byte 27
@@ -286,11 +288,11 @@ function parseSession(msg) {
     // d+0..16: basic fields (unchanged from F1 24)
     // d+17: sliProNativeSupport (1)
     // d+18: numMarshalZones (1)
-    // d+19: marshalZones[21] = 21 * (float4 + int8) = 21 * 5 = 105 bytes â†’ ends at d+123
+    // d+19: marshalZones[21] = 21 * (float4 + int8) = 21 * 5 = 105 bytes → ends at d+123
     // d+124: safetyCarStatus
     // d+125: networkGame
     // d+126: numWeatherForecastSamples
-    // d+127: weatherForecastSamples[64] = 64 * 8 = 512 bytes â†’ ends at d+638
+    // d+127: weatherForecastSamples[64] = 64 * 8 = 512 bytes → ends at d+638
     // d+639: forecastAccuracy, d+640: aiDifficulty
     // d+641: seasonLinkId(4), d+645: weekendLinkId(4), d+649: sessionLinkId(4)
     // d+653: pitStopWindowIdealLap, d+654: pitStopWindowLatestLap, d+655: pitStopRejoinPosition
@@ -335,6 +337,7 @@ function parseSession(msg) {
       isSpectating:       msg.readUInt8(d + 15),
       spectatorCarIndex:  msg.readUInt8(d + 16),
       safetyCarStatus,
+      numRedFlagPeriods:  msg.length > d + 678 ? msg.readUInt8(d + 678) : 0,
       pitStopWindowIdealLap:  pitIdeal,
       pitStopWindowLatestLap: pitLatest,
       weatherForecast,
@@ -389,16 +392,16 @@ function parseParticipants(msg) {
   // +1  driverId (u8)
   // +2  networkId (u8)
   // +3  teamId (u8)
-  // +4  myTeam (u8)          â† NEW in F1 25
+  // +4  myTeam (u8)          ← NEW in F1 25
   // +5  raceNumber (u8)
   // +6  nationality (u8)
-  // +7  name[32] (char)      â† was 48 in F1 24
+  // +7  name[32] (char)      ← was 48 in F1 24
   // +39 yourTelemetry (u8)
   // +40 showOnlineNames (u8)
-  // +41 techLevel (u16)      â† NEW in F1 25
+  // +41 techLevel (u16)      ← NEW in F1 25
   // +43 platform (u8)
-  // +44 numColours (u8)      â† NEW in F1 25
-  // +45 liveryColours[4Ã—3]   â† NEW in F1 25 (12 bytes)
+  // +44 numColours (u8)      ← NEW in F1 25
+  // +45 liveryColours[4×3]   ← NEW in F1 25 (12 bytes)
   // Total = 57 bytes
   const d = PACKET_HEADER_SIZE;
   if (msg.length < d + 1) return null;
@@ -478,6 +481,12 @@ function parseCarTelemetry(msg) {
           msg.readFloatLE(o + 48),
           msg.readFloatLE(o + 52),
         ],
+        surfaceType: [
+          msg.readUInt8(o + 56),
+          msg.readUInt8(o + 57),
+          msg.readUInt8(o + 58),
+          msg.readUInt8(o + 59),
+        ],
       });
     } catch {
       cars.push(null);
@@ -529,28 +538,28 @@ function parseCarStatus(msg) {
 
 function parseCarDamage(msg) {
   // F1 25 CarDamageData layout (46 bytes/car):
-  // +0  tyresWear[4]       (4Ã—float = 16 bytes) RL RR FL FR
-  // +16 tyresDamage[4]     (4Ã—u8 = 4 bytes)     RL RR FL FR
-  // +20 brakesDamage[4]    (4Ã—u8 = 4 bytes)     RL RR FL FR  â† was [2] in F1 24
-  // +24 tyreBlisters[4]    (4Ã—u8 = 4 bytes)     RL RR FL FR  â† NEW in F1 25
-  // +28 frontLeftWingDamage  (u8)   â† was +22
-  // +29 frontRightWingDamage (u8)   â† was +23
-  // +30 rearWingDamage       (u8)   â† was +24
-  // +31 floorDamage          (u8)   â† was +25
-  // +32 diffuserDamage       (u8)   â† was +26
-  // +33 sidepodDamage        (u8)   â† was +27
-  // +34 drsFault             (u8)   â† was +28
-  // +35 ersFault             (u8)   â† was +29
-  // +36 gearBoxDamage        (u8)   â† was +30
-  // +37 engineDamage         (u8)   â† was +31
-  // +38 engineMGUHWear       (u8)   â† was +32
-  // +39 engineESWear         (u8)   â† was +33
-  // +40 engineCEWear         (u8)   â† was +34
-  // +41 engineICEWear        (u8)   â† was +35
-  // +42 engineMGUKWear       (u8)   â† was +36
-  // +43 engineTCWear         (u8)   â† was +37
-  // +44 engineBlown          (u8)   â† NEW in F1 25
-  // +45 engineSeized         (u8)   â† NEW in F1 25
+  // +0  tyresWear[4]       (4×float = 16 bytes) RL RR FL FR
+  // +16 tyresDamage[4]     (4×u8 = 4 bytes)     RL RR FL FR
+  // +20 brakesDamage[4]    (4×u8 = 4 bytes)     RL RR FL FR  ← was [2] in F1 24
+  // +24 tyreBlisters[4]    (4×u8 = 4 bytes)     RL RR FL FR  ← NEW in F1 25
+  // +28 frontLeftWingDamage  (u8)   ← was +22
+  // +29 frontRightWingDamage (u8)   ← was +23
+  // +30 rearWingDamage       (u8)   ← was +24
+  // +31 floorDamage          (u8)   ← was +25
+  // +32 diffuserDamage       (u8)   ← was +26
+  // +33 sidepodDamage        (u8)   ← was +27
+  // +34 drsFault             (u8)   ← was +28
+  // +35 ersFault             (u8)   ← was +29
+  // +36 gearBoxDamage        (u8)   ← was +30
+  // +37 engineDamage         (u8)   ← was +31
+  // +38 engineMGUHWear       (u8)   ← was +32
+  // +39 engineESWear         (u8)   ← was +33
+  // +40 engineCEWear         (u8)   ← was +34
+  // +41 engineICEWear        (u8)   ← was +35
+  // +42 engineMGUKWear       (u8)   ← was +36
+  // +43 engineTCWear         (u8)   ← was +37
+  // +44 engineBlown          (u8)   ← NEW in F1 25
+  // +45 engineSeized         (u8)   ← NEW in F1 25
   const d = PACKET_HEADER_SIZE;
   const cars = [];
   for (let i = 0; i < MAX_CARS; i++) {
@@ -925,7 +934,7 @@ setInterval(() => {
     broadcastSession(context);
   }
 }, 2000);
-// â”€â”€â”€ Claude AI Engineer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Claude AI Engineer ───────────────────────────────────────────────────────
 const ENGINEER_SYSTEM_PROMPT = `You are the inbuilt AI Race Engineer inside a professional team telemetry software for F1 25.
 
 Your job is to act like a real race engineer during live sessions: race, qualifying, practice, formation lap, safety car, VSC, in-lap, out-lap, and pit phases.
@@ -934,7 +943,7 @@ You are not a generic assistant. You are a high-performance race engineer whose 
 
 Your outputs may be spoken directly to the driver. Every message must therefore be: short, clear, actionable, well timed, relevant to the current moment, free of filler, free of unnecessary explanation.
 
-CORE ROLE: You are the brain of an advanced team telemetry software. Your goal is to improve the race result â€” not to describe the race.
+CORE ROLE: You are the brain of an advanced team telemetry software. Your goal is to improve the race result — not to describe the race.
 
 COMMUNICATION STYLE: Speak like a real F1 race engineer: concise, composed, direct, specific, tactical.
 Good: "Car behind has 20% more battery. Defend Turn 1 and protect the exit."
@@ -945,12 +954,12 @@ RADIO DISCIPLINE: Maximum 1-2 short sentences. Only speak when it matters for: i
 
 TACTICAL COMPARISON RULES: When nearby rivals matter, compare in this order: 1) immediate attack/defense threat, 2) battery delta, 3) tire wear delta, 4) damage delta, 5) pace trend. Only mention the top 1-2 differences. Express in relative terms: "Car behind has 20% more battery than you." "You have 12% better front tire life than car ahead."
 
-ATTACK BEHAVIOR: When car ahead is within 1.2s â€” identify vulnerability (tire wear, overheating, low battery, damage, poor traction), identify best corners, guide battery usage. Avoid impossible moves. Build pressure when pass isn't optimal.
+ATTACK BEHAVIOR: When car ahead is within 1.2s — identify vulnerability (tire wear, overheating, low battery, damage, poor traction), identify best corners, guide battery usage. Avoid impossible moves. Build pressure when pass isn't optimal.
 
-DEFENSE BEHAVIOR: When car behind is within 1.0s â€” identify if they have DRS, battery advantage, fresher tires. Advise WHERE to defend, not just that threat exists. Consider tire state, damage, straight-line delta.
+DEFENSE BEHAVIOR: When car behind is within 1.0s — identify if they have DRS, battery advantage, fresher tires. Advise WHERE to defend, not just that threat exists. Consider tire state, damage, straight-line delta.
 
 OUTPUT MODES:
-- Default: DRIVER_RADIO â€” only what should be spoken to driver. Maximum 2 short sentences.
+- Default: DRIVER_RADIO — only what should be spoken to driver. Maximum 2 short sentences.
 - If asked for ENGINEER_DECISION, return exactly:
   speak: yes/no
   urgency: low/medium/high/critical
@@ -960,7 +969,7 @@ OUTPUT MODES:
 
 PRIORITY: 1) Safety/incident, 2) Major damage, 3) Overtake threat or attack opportunity, 4) Pit/weather/tire call, 5) Tire failure risk, 6) ERS tactical, 7) Pace optimization, 8) Technique, 9) Info.
 
-Do NOT invent telemetry not provided. Do NOT force numbers not grounded in input. Do NOT speak for trivial or informational reasons â€” only speak when it materially affects the race outcome.`;
+Do NOT invent telemetry not provided. Do NOT force numbers not grounded in input. Do NOT speak for trivial or informational reasons — only speak when it materially affects the race outcome.`;
 
 ipcMain.handle('tts-speak', async (_, { text, voice }) => {
   const communicate = new IsomorphicCommunicate(text, { voice });
@@ -1012,7 +1021,7 @@ ipcMain.on('set-api-key', (_, key) => {
   anthropic = null; // reset client
 });
 
-// ─── GPT Realtime AI Engineer ─────────────────────────────────────────────────
+// --- GPT Realtime AI Engineer -------------------------------------------------
 let gptRealtimeEngine = null;
 let gptRealtimeSubscriberWindowId = null;
 
@@ -1025,10 +1034,18 @@ function licensePath() {
   return path.join(app.getPath('userData'), 'race-engineer-license.json');
 }
 
+function hasCreditPayload(value) {
+  return Number.isFinite(Number(value?.creditsRemaining))
+    || Number.isFinite(Number(value?.racesRemaining))
+    || Number.isFinite(Number(value?.qualifyingRemaining));
+}
+
+function getSyncedCredits(value, fallback = 0) {
+  return hasCreditPayload(value) ? getResolvedCreditsRemaining(value) : Math.max(0, Number(fallback || 0));
+}
+
 function normalizeLicenseMain(license) {
   const normalized = { ...license };
-  const races = Number(normalized.racesRemaining || 0);
-  const quals = Number(normalized.qualifyingRemaining || 0);
   if (!Array.isArray(normalized.purchases)) normalized.purchases = [];
   if (!Array.isArray(normalized.paymentEvents)) normalized.paymentEvents = [];
   if (!Array.isArray(normalized.processedOrderIds)) normalized.processedOrderIds = [];
@@ -1039,20 +1056,23 @@ function normalizeLicenseMain(license) {
     const activeKey = String(normalized.licenseKey || '').trim().toUpperCase();
     const lastKey = String(normalized.lastIssuedLicenseKey || '').trim().toUpperCase();
     if (hadPersistedDevMode && !activeKey) {
-      normalized.racesRemaining = 0;
-      normalized.qualifyingRemaining = 0;
+      applySharedCreditAliases(normalized, 0);
       normalized.machineId = null;
     }
     if (activeKey.startsWith('RE-DEV-')) {
       normalized.licenseKey = null;
       normalized.machineId = null;
-      normalized.racesRemaining = 0;
-      normalized.qualifyingRemaining = 0;
+      applySharedCreditAliases(normalized, 0);
     }
     if (!normalized.licenseKey && lastKey.startsWith('RE-DEV-')) {
       normalized.lastIssuedLicenseKey = null;
     }
   }
+
+  const credits = normalized.devMode || isDevMode()
+    ? 999
+    : getResolvedCreditsRemaining(normalized);
+  applySharedCreditAliases(normalized, credits);
 
   if (normalized.devMode || isDevMode()) {
     normalized.licenseStatus = 'dev';
@@ -1070,7 +1090,7 @@ function normalizeLicenseMain(license) {
     return normalized;
   }
 
-  if (races <= 0 && quals <= 0) {
+  if ((normalized.creditsRemaining || 0) <= 0) {
     normalized.licenseStatus = 'exhausted';
     normalized.licenseExhaustedAt = normalized.licenseExhaustedAt || new Date().toISOString();
   } else {
@@ -1084,8 +1104,7 @@ function loadLicenseMain() {
   const lic = normalizeLicenseMain(loadLicense(licensePath()));
   if (isDevMode()) {
     lic.devMode = true;
-    lic.racesRemaining = 999;
-    lic.qualifyingRemaining = 999;
+    applySharedCreditAliases(lic, 999);
   }
   return normalizeLicenseMain(lic);
 }
@@ -1094,7 +1113,7 @@ function loadLicenseMain() {
  * On startup: validate the stored license key with the Worker.
  * If the Worker says it's not valid on this machine (e.g., admin revoked or
  * machine was deactivated from another device), zero out the credits.
- * Runs silently — if Worker is unreachable, local credits remain.
+ * Runs silently - if Worker is unreachable, local credits remain.
  */
 async function validateLicenseOnStartup() {
   const lic = loadLicenseMain();
@@ -1105,26 +1124,23 @@ async function validateLicenseOnStartup() {
   try {
     const result = await validateLicenseKey(lic.licenseKey, machineId);
     if (result.valid === false) {
-      // Key is no longer valid on this machine — clear credits
       console.warn('[Race Engineer] License key validation failed:', result.reason);
-      const revoked = { ...lic, racesRemaining: 0, qualifyingRemaining: 0, licenseKey: null, machineId: null };
+      const revoked = applySharedCreditAliases({ ...lic, licenseKey: null, machineId: null }, 0);
       const saved = saveLicenseMain(revoked);
       broadcastLicense(saved);
       return;
     }
 
     if (result.valid === true) {
-      const synced = {
+      const synced = applySharedCreditAliases({
         ...lic,
         machineId,
-        racesRemaining: Number.isFinite(result.racesRemaining) ? Number(result.racesRemaining) : lic.racesRemaining,
-        qualifyingRemaining: Number.isFinite(result.qualifyingRemaining) ? Number(result.qualifyingRemaining) : lic.qualifyingRemaining,
-      };
+      }, getSyncedCredits(result, lic.creditsRemaining));
       const saved = saveLicenseMain(synced);
       broadcastLicense(saved);
     }
   } catch {
-    // Worker unreachable — keep local credits, try again next startup
+    // Worker unreachable - keep local credits, try again next startup
   }
 }
 
@@ -1207,7 +1223,7 @@ ipcMain.handle('set-byok-mode', (_, { enabled }) => {
   return { success: true, license: saved };
 });
 
-// ── Hosted checkout providers ────────────────────────────────────────────────
+// -- Hosted checkout providers ------------------------------------------------
 const PAYPAL_SUCCESS_URL = 'race-engineer://paypal-success?pack_id={pack_id}';
 const PAYPAL_CANCEL_URL  = 'race-engineer://paypal-cancel';
 const pendingPaymentOrders = new Map();
@@ -1363,7 +1379,7 @@ ipcMain.handle('stripe-verify-session', async (_, { sessionId: orderId, packId, 
   let activationResult = null;
   let activationWarning = null;
   if (isDevMode() || String(orderId || '').startsWith('DEV_')) {
-    licenseKey = `RE-DEV-${pack.type === 'qualifying' ? 'QUAL' : 'RACE'}-${pack.count}`;
+    licenseKey = `RE-DEV-SESSION-${pack.count}`;
   } else {
     licenseKey = generateLicenseKeyFromOrder(orderId);
     const registered = await registerLicenseKey(licenseKey, pack, captured.txId);
@@ -1421,8 +1437,7 @@ ipcMain.handle('stripe-verify-session', async (_, { sessionId: orderId, packId, 
     : { ...lic };
   updated.processedOrderIds = [...(updated.processedOrderIds || []), orderId].slice(-300);
   if (activationResult?.success) {
-    if (Number.isFinite(activationResult.racesRemaining)) updated.racesRemaining = Number(activationResult.racesRemaining);
-    if (Number.isFinite(activationResult.qualifyingRemaining)) updated.qualifyingRemaining = Number(activationResult.qualifyingRemaining);
+    applySharedCreditAliases(updated, getSyncedCredits(activationResult, updated.creditsRemaining));
   }
   if (licenseKey) {
     const purchases = updated.purchases || [];
@@ -1458,7 +1473,7 @@ ipcMain.handle('stripe-verify-session', async (_, { sessionId: orderId, packId, 
 ipcMain.handle('start-dev-session', () => {
   if (!isDevMode()) return { error: 'Dev mode not active' };
   const lic = loadLicenseMain();
-  const updated = { ...lic, devMode: true, racesRemaining: 999, qualifyingRemaining: 999 };
+  const updated = applySharedCreditAliases({ ...lic, devMode: true }, 999);
   saveLicenseMain(updated);
   broadcastLicense(updated);
   return { success: true, license: updated };
@@ -1473,7 +1488,6 @@ ipcMain.handle('activate-license-key', async (_, { licenseKey }) => {
   const { hostname } = await import('node:os');
   const machineLabel = hostname();
 
-  // Activate via Worker — handles seat limits and machine tracking
   const result = await activateLicenseKey(key, machineId, machineLabel);
   if (!result.success) return { error: result.error || 'Activation failed.' };
 
@@ -1481,12 +1495,11 @@ ipcMain.handle('activate-license-key', async (_, { licenseKey }) => {
   const alreadyRedeemed = (lic.purchases || []).some(p => p.txId === key);
   let updated = { ...lic };
 
-  if (Number.isFinite(result.racesRemaining) || Number.isFinite(result.qualifyingRemaining)) {
-    if (Number.isFinite(result.racesRemaining)) updated.racesRemaining = Number(result.racesRemaining);
-    if (Number.isFinite(result.qualifyingRemaining)) updated.qualifyingRemaining = Number(result.qualifyingRemaining);
+  if (hasCreditPayload(result)) {
+    updated = applySharedCreditAliases(updated, getSyncedCredits(result, updated.creditsRemaining));
   } else if (!alreadyRedeemed) {
-    const pack = { id: result.packId || key, type: result.packType, count: result.packCount };
-    updated = applyPurchase(updated, pack, key); // fallback for older worker responses
+    const pack = { id: result.packId || key, type: result.packType || 'session', count: result.packCount };
+    updated = applyPurchase(updated, pack, key);
   }
 
   updated.licenseKey = key;
@@ -1503,13 +1516,15 @@ ipcMain.handle('activate-license-key', async (_, { licenseKey }) => {
       ? 'License activated. Existing remaining credits synced.'
       : 'License activated successfully.',
   });
+  const creditsRemaining = getSyncedCredits(result, saved.creditsRemaining);
   return {
     success: true,
     license: logged || saved,
-    packType: result.packType,
+    packType: result.packType || 'session',
     packCount: result.packCount,
-    racesRemaining: result.racesRemaining,
-    qualifyingRemaining: result.qualifyingRemaining,
+    creditsRemaining,
+    racesRemaining: creditsRemaining,
+    qualifyingRemaining: creditsRemaining,
     exhausted: result.exhausted,
   };
 });
@@ -1535,9 +1550,6 @@ ipcMain.handle('gpt-realtime-connect', async (event, { userApiKey, voice, sessio
   const lic = loadLicenseMain();
   const sType = sessionType || 'race';
 
-  // ── Determine which OpenAI key to use ──────────────────────────────────────
-  // BYOK: user provided their own key — use it, no credits consumed
-  // Subscription: use our app key, consume a credit
   const isByok = lic.byokMode && userApiKey;
   const keyToUse = isByok ? userApiKey : YOUR_APP_OPENAI_KEY;
   const requiresLiveLicense = !isByok && !lic.devMode && !isDevMode();
@@ -1547,21 +1559,23 @@ ipcMain.handle('gpt-realtime-connect', async (event, { userApiKey, voice, sessio
       error: 'No active license key. Activate a license key in Settings or buy a pack first.',
       code: 'NO_LICENSE_KEY',
       needsNewKey: true,
-      racesRemaining: lic.racesRemaining || 0,
-      qualifyingRemaining: lic.qualifyingRemaining || 0,
+      creditsRemaining: lic.creditsRemaining || 0,
+      racesRemaining: lic.creditsRemaining || 0,
+      qualifyingRemaining: lic.creditsRemaining || 0,
     };
   }
 
   if (!isByok && !hasCredits(lic, sType)) {
-    const exhausted = !!lic.licenseKey && (lic.racesRemaining || 0) <= 0 && (lic.qualifyingRemaining || 0) <= 0;
+    const exhausted = !!lic.licenseKey && (lic.creditsRemaining || 0) <= 0;
     return {
       error: exhausted
         ? 'Your current license key has no credits left. Activate a new key or buy another pack.'
-        : 'No AI Engineer credits. Buy a race pack or use your own OpenAI key (BYOK mode).',
+        : 'No AI Engineer credits. Buy a credit pack or use your own OpenAI key (BYOK mode).',
       code: exhausted ? 'LICENSE_EXHAUSTED' : 'NO_CREDITS',
       needsNewKey: exhausted,
-      racesRemaining: lic.racesRemaining || 0,
-      qualifyingRemaining: lic.qualifyingRemaining || 0,
+      creditsRemaining: lic.creditsRemaining || 0,
+      racesRemaining: lic.creditsRemaining || 0,
+      qualifyingRemaining: lic.creditsRemaining || 0,
     };
   }
   if (!isByok && !keyToUse) {
@@ -1571,7 +1585,6 @@ ipcMain.handle('gpt-realtime-connect', async (event, { userApiKey, voice, sessio
     return { error: 'Enter your OpenAI API key in Settings to use BYOK mode.' };
   }
 
-  // Consume credit only in subscription mode
   let updated = lic;
   let consumedViaWorker = false;
   let consumedMachineId = null;
@@ -1583,26 +1596,19 @@ ipcMain.handle('gpt-realtime-connect', async (event, { userApiKey, voice, sessio
       if (consumed?.success) {
         consumedViaWorker = true;
         consumedMachineId = machineId;
-        updated = {
-          ...lic,
-          racesRemaining: Number.isFinite(consumed.racesRemaining) ? Number(consumed.racesRemaining) : lic.racesRemaining,
-          qualifyingRemaining: Number.isFinite(consumed.qualifyingRemaining) ? Number(consumed.qualifyingRemaining) : lic.qualifyingRemaining,
-        };
-      } else if (consumed?.code === 'NO_RACE_CREDITS' || consumed?.code === 'NO_QUALIFYING_CREDITS') {
-        updated = {
-          ...lic,
-          racesRemaining: Number.isFinite(consumed.racesRemaining) ? Number(consumed.racesRemaining) : lic.racesRemaining,
-          qualifyingRemaining: Number.isFinite(consumed.qualifyingRemaining) ? Number(consumed.qualifyingRemaining) : lic.qualifyingRemaining,
-        };
+        updated = applySharedCreditAliases({ ...lic }, getSyncedCredits(consumed, lic.creditsRemaining));
+      } else if (consumed?.code === 'NO_CREDITS' || consumed?.code === 'NO_RACE_CREDITS' || consumed?.code === 'NO_QUALIFYING_CREDITS') {
+        updated = applySharedCreditAliases({ ...lic }, getSyncedCredits(consumed, lic.creditsRemaining));
         const saved = saveLicenseMain(updated);
         broadcastLicense(saved);
-        const exhausted = (saved.racesRemaining || 0) <= 0 && (saved.qualifyingRemaining || 0) <= 0;
+        const exhausted = (saved.creditsRemaining || 0) <= 0;
         return {
           error: consumed.error || 'No credits remaining on this license key.',
           code: consumed.code || (exhausted ? 'LICENSE_EXHAUSTED' : 'NO_CREDITS'),
           needsNewKey: exhausted,
-          racesRemaining: saved.racesRemaining || 0,
-          qualifyingRemaining: saved.qualifyingRemaining || 0,
+          creditsRemaining: saved.creditsRemaining || 0,
+          racesRemaining: saved.creditsRemaining || 0,
+          qualifyingRemaining: saved.creditsRemaining || 0,
         };
       } else {
         const serverUnavailable = consumed?.code === 'LICENSE_SERVER_UNAVAILABLE'
@@ -1612,7 +1618,7 @@ ipcMain.handle('gpt-realtime-connect', async (event, { userApiKey, voice, sessio
           level: 'error',
           licenseKey: lic.licenseKey,
           message: serverUnavailable
-            ? `${consumed?.error || 'License server unavailable.'} AI Engineer is blocked until the license server is reachable.`
+            ? ((consumed?.error || 'License server unavailable.') + ' AI Engineer is blocked until the license server is reachable.')
             : (consumed?.error || 'Failed to validate remaining credits for this license key.'),
         });
         return {
@@ -1621,8 +1627,9 @@ ipcMain.handle('gpt-realtime-connect', async (event, { userApiKey, voice, sessio
             : (consumed?.error || 'Failed to validate remaining credits for this license key.'),
           code: consumed?.code || 'LICENSE_CONSUME_FAILED',
           needsNewKey: false,
-          racesRemaining: lic.racesRemaining || 0,
-          qualifyingRemaining: lic.qualifyingRemaining || 0,
+          creditsRemaining: lic.creditsRemaining || 0,
+          racesRemaining: lic.creditsRemaining || 0,
+          qualifyingRemaining: lic.creditsRemaining || 0,
         };
       }
     } else {
@@ -1656,37 +1663,25 @@ ipcMain.handle('gpt-realtime-connect', async (event, { userApiKey, voice, sessio
 
   try {
     await gptRealtimeEngine.connect(keyToUse, voice || 'echo');
-    const creditsKey = sType === 'qualifying' ? 'qualifyingRemaining' : 'racesRemaining';
     return {
       success: true,
       mode: isByok ? 'byok' : 'subscription',
-      creditsRemaining: isByok ? null : updated[creditsKey],
+      creditsRemaining: isByok ? null : (updated.creditsRemaining ?? 0),
     };
   } catch (err) {
-    // Refund credit if connection failed in subscription mode
     if (!isByok) {
       if (consumedViaWorker && lic.licenseKey && consumedMachineId) {
         const refundedRemote = await refundLicenseKeyCredit(lic.licenseKey, consumedMachineId, sType);
-        const refunded = {
-          ...updated,
-          racesRemaining: Number.isFinite(refundedRemote?.racesRemaining)
-            ? Number(refundedRemote.racesRemaining)
-            : updated.racesRemaining,
-          qualifyingRemaining: Number.isFinite(refundedRemote?.qualifyingRemaining)
-            ? Number(refundedRemote.qualifyingRemaining)
-            : updated.qualifyingRemaining,
-        };
+        const refunded = applySharedCreditAliases({ ...updated }, getSyncedCredits(refundedRemote, updated.creditsRemaining));
         const saved = saveLicenseMain(refunded);
         broadcastLicense(saved);
       } else {
-        const refunded = { ...updated };
-        if (sType === 'qualifying') refunded.qualifyingRemaining++;
-        else refunded.racesRemaining++;
+        const refunded = applySharedCreditAliases({ ...updated }, (updated.creditsRemaining || 0) + 1);
         const saved = saveLicenseMain(refunded);
         broadcastLicense(saved);
       }
     }
-    return { error: `GPT Realtime connection failed: ${err.message}` };
+    return { error: 'GPT Realtime connection failed: ' + err.message };
   }
 });
 
@@ -1709,13 +1704,13 @@ ipcMain.handle('gpt-realtime-status', () => ({
   connected: gptRealtimeEngine?.connected ?? false,
 }));
 
-// â”€â”€â”€ Settings persistence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Settings persistence ────────────────────────────────────────────────────
 function settingsPath() {
   return path.join(app.getPath('userData'), 'race-engineer-settings.json');
 }
 
-// â”€â”€â”€ App Lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// ── Deep link protocol for PayPal redirect ───────────────────────────────────
+// ─── App Lifecycle ────────────────────────────────────────────────────────────
+// -- Deep link protocol for PayPal redirect -----------------------------------
 // PayPal redirects to race-engineer://paypal-success?token=ORDER_ID&pack_id=...
 // Electron intercepts this and sends it to the renderer via IPC.
 if (process.defaultApp) {
@@ -1935,6 +1930,31 @@ app.whenReady().then(() => {
     }
   });
 
+  ipcMain.handle('save-export-file', async (_event, payload = {}) => {
+    const defaultName = typeof payload.defaultName === 'string' && payload.defaultName.trim()
+      ? payload.defaultName.trim()
+      : 'race-engineer-export.csv';
+    const filters = Array.isArray(payload.filters) && payload.filters.length > 0
+      ? payload.filters
+      : [{ name: 'CSV', extensions: ['csv'] }];
+    const content = typeof payload.content === 'string' ? payload.content : '';
+    if (!content) return { error: 'No export content to save.' };
+
+    const suggestedPath = path.join(app.getPath('documents'), defaultName);
+    try {
+      const result = await dialog.showSaveDialog({
+        title: 'Export Race Data',
+        defaultPath: suggestedPath,
+        filters,
+      });
+      if (result.canceled || !result.filePath) return { cancelled: true };
+
+      await fs.promises.writeFile(result.filePath, content, 'utf8');
+      return { success: true, filePath: result.filePath };
+    } catch (error) {
+      return { error: error.message || 'Failed to save export file.' };
+    }
+  });
   // Provide current telemetry state snapshot (for windows that load late)
   ipcMain.handle('get-state-snapshot', (event) => {
     const context = getContextForWindow(event.sender.id);
@@ -1972,5 +1992,6 @@ app.on('window-all-closed', () => {
   windowPortMap.clear();
   if (process.platform !== 'darwin') app.quit();
 });
+
 
 

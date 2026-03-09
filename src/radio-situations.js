@@ -11,9 +11,9 @@ export const RADIO_CATEGORIES = {
     icon: '⚡',
     description: 'Race start, launch quality, position changes, cold tyres',
     situations: [
-      'good_launch', 'bad_launch',
-      'gained_places_t1', 'lost_places_t1',
-      'wing_damage_start', 'cold_tyres_start',
+      'start_gained_places', 'start_lost_places',
+      'start_grid_held', 'start_cold_tyres',
+      'start_t1_jump',
     ],
   },
 
@@ -21,9 +21,12 @@ export const RADIO_CATEGORIES = {
   normal: {
     label: 'Normal Lap-by-Lap',
     icon: '↻',
-    description: 'Clean/dirty air and gap-change information',
+    description: 'Clean/dirty air, fuel state, position updates, and slower traffic alerts',
     situations: [
-      'clean_air', 'dirty_air', 'closing_slower', 'pulling_away',
+      'clean_air', 'dirty_air', 'closing_slower', 'being_caught',
+      'fuel_critical', 'fuel_recovered',
+      'position_lost', 'outlap_clear', 'outlap_traffic', 'qualifying_lap_complete',
+      'slower_car_ahead',
     ],
   },
 
@@ -31,9 +34,9 @@ export const RADIO_CATEGORIES = {
   overtake: {
     label: 'Overtaking',
     icon: '→',
-    description: 'ERS use, tyre/damage advantage, undercut/overcut, penalty',
+    description: 'Position gains, attack calls, and overtaking opportunities',
     situations: [
-      'ers_overtake',
+      'position_gained', 'attack_scenario', 'mixed_scenario',
       'tyre_advantage_pass', 'damage_pass',
       'undercut_pass', 'overcut_pass',
       'sc_restart_pass', 'low_ers_pass',
@@ -45,9 +48,9 @@ export const RADIO_CATEGORIES = {
   defend: {
     label: 'Defending',
     icon: '⛨',
-    description: 'Battery disadvantage, worn tyres, damage, prolonged battle',
+    description: 'Defense scenarios, worn tyres, damage, and pressure',
     situations: [
-      'defend_low_battery', 'defend_worn_tyres',
+      'defense_scenario', 'defend_low_battery', 'defend_worn_tyres',
       'defend_with_damage', 'defend_sc_restart',
       'defend_prolonged',
     ],
@@ -70,7 +73,7 @@ export const RADIO_CATEGORIES = {
     description: 'Wear, temperature, compound strategy, cliff, wet crossover',
     situations: [
       'tyres_warming_slow', 'tyres_overheating_dirty',
-      'fl_wear_high', 'rear_overheating',
+      'fl_wear_high', 'tyre_wear_critical', 'rear_overheating',
       'lockup_flat_spot', 'tyre_cliff', 'extending_stint',
       'inters_crossover', 'wets_crossover',
     ],
@@ -85,7 +88,9 @@ export const RADIO_CATEGORIES = {
       'planned_stop', 'early_stop', 'late_stop',
       'undercut_attempt', 'overcut_attempt',
       'rejoin_traffic', 'rejoin_clean_air',
-      'pit_limiter', 'emergency_stop', 'free_stop_sc', 'serving_penalty',
+      'pit_limiter', 'pit_exit_new_tyres',
+      'emergency_stop', 'free_stop_sc', 'serving_penalty',
+      'late_race_hold_track', 'short_race_hold_track', 'weather_crossover_pit',
     ],
   },
 
@@ -96,7 +101,7 @@ export const RADIO_CATEGORIES = {
     description: 'Rain transitions, crossover points, drying track',
     situations: [
       'light_rain_begins', 'rain_heavier', 'drying_track',
-      'inter_crossover', 'wet_crossover', 'wrong_tyre_conditions',
+      'inter_crossover', 'wet_crossover', 'wrong_tyre_conditions', 'weather_change',
     ],
   },
 
@@ -104,13 +109,13 @@ export const RADIO_CATEGORIES = {
   flags: {
     label: 'Flags & Safety Car',
     icon: '⚑',
-    description: 'Yellow, SC, VSC, red flag, neutralization, restart',
+    description: 'Yellow, SC, VSC, red flag, neutralization, restart, and nearby hazards',
     situations: [
-      'yellow_flag', 'double_yellow', 'no_overtaking',
+      'yellow_flag', 'blue_flag', 'double_yellow', 'no_overtaking',
       'vsc_deployed', 'vsc_delta', 'vsc_pit_opportunity',
       'sc_deployed', 'sc_pack_bunches', 'sc_pit_window',
       'sc_cold_tyres_restart', 'sc_leader_controls',
-      'red_flag', 'red_free_tyre_change', 'flag_green',
+      'red_flag', 'red_free_tyre_change', 'flag_green', 'car_rejoining_track',
     ],
   },
 
@@ -120,7 +125,7 @@ export const RADIO_CATEGORIES = {
     icon: '▶',
     description: 'SC/VSC restarts and tyre temperatures',
     situations: [
-      'sc_restart', 'vsc_ending', 'easy_pass_cold_tyres',
+      'sc_restart', 'vsc_ending', 'restart_green_go', 'easy_pass_cold_tyres',
     ],
   },
 
@@ -156,8 +161,6 @@ export const RADIO_CATEGORIES = {
     situations: [
       'save_battery_one_move', 'use_ers_wisely',
       'dont_sit_dirty_air',
-      'older_tyres_earlier_braking', 'older_tyres_worse_traction',
-      'fresher_tyres_better_rotation', 'fresher_tyres_pressure',
       'tyre_preservation_battle', 'undercut_key',
     ],
   },
@@ -241,6 +244,10 @@ export const RADIO_MESSAGES = {
   normal_clean_air: () => ({
     text: 'Clean air. Good gap. Focus on pace and tyre management.',
     urgency: 'low',
+  }),
+  normal_slower_car_ahead: (ctx) => ({
+    text: `Slower car ahead, ${ctx.distanceMeters} metres.`,
+    urgency: 'medium',
   }),
   normal_closing: (ctx) => ({
     text: `Closing on ${ctx.aheadName}. Gap down to ${(ctx.gapMs / 1000).toFixed(1)}s. Be ready for DRS range.`,
@@ -429,8 +436,12 @@ export const RADIO_MESSAGES = {
 
   // ── Flags ──
   flag_yellow: () => ({
-    text: 'Yellow flag ahead. Slow down, no overtaking. Caution.',
+    text: 'Yellow flag. No overtaking.',
     urgency: 'critical',
+  }),
+  flag_rejoining_track: (ctx) => ({
+    text: `${ctx.rivalName} rejoining track, ${ctx.distanceMeters} metres.`,
+    urgency: 'high',
   }),
   flag_sc: () => ({
     text: 'Safety car deployed! Close up to the pack. Consider pit strategy.',
@@ -454,8 +465,12 @@ export const RADIO_MESSAGES = {
     text: 'Safety car in this lap. Get heat in the tyres and brakes. Ready for the restart.',
     urgency: 'high',
   }),
+  restart_vsc_ending: () => ({
+    text: 'VSC ending. Racing resumes.',
+    urgency: 'high',
+  }),
   restart_go: () => ({
-    text: 'Green flag! Race is live. Push now, exploit cold tyres around you.',
+    text: 'Green, green. Go, go, go.',
     urgency: 'high',
   }),
 

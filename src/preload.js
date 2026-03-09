@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('raceEngineer', {
   openWindow: (opts) => ipcRenderer.invoke('open-window', opts),
   setWindowTitle: (title) => ipcRenderer.send('set-window-title', title),
   getStateSnapshot: () => ipcRenderer.invoke('get-state-snapshot'),
+  saveExportFile: (payload) => ipcRenderer.invoke('save-export-file', payload),
 
   // ── GPT Realtime AI Engineer ───────────────────────────────────────────────
   gptRealtimeConnect:    (payload) => ipcRenderer.invoke('gpt-realtime-connect', payload),
@@ -56,3 +57,4 @@ contextBridge.exposeInMainWorld('raceEngineer', {
   onGptStatus:       (cb) => ipcRenderer.on('gpt-status',         (_, d) => cb(d)),
   onLicenseUpdate:   (cb) => ipcRenderer.on('license-update',     (_, d) => cb(d)),
 });
+

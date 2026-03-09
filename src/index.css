@@ -223,14 +223,14 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   border-radius: 50%;
   border: 3px solid var(--bg3);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  font-size: 15px; font-weight: 700;
+  font-size: 17px; font-weight: 700;
   transition: border-color 0.3s;
   position: relative;
 }
-.tyre-circle .tyre-temp { font-size: 14px; font-weight: 700; }
-.tyre-circle .tyre-unit { font-size: 9px; color: var(--text2); }
-.tyre-label { font-size: 10px; color: var(--text2); }
-.tyre-wear  { font-size: 10px; color: var(--text2); }
+.tyre-circle .tyre-temp { font-size: 17px; font-weight: 700; }
+.tyre-circle .tyre-unit { font-size: 11px; color: var(--text2); }
+.tyre-label { font-size: 12px; color: var(--text2); }
+.tyre-wear  { font-size: 12px; color: var(--text2); }
 
 /* Tyre temp colors */
 .temp-cold   { border-color: #4477ff; color: #4477ff; }
@@ -305,6 +305,16 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .status-badge { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
 .status-badge.dnf { background: rgba(220,0,0,0.2); color: var(--red); }
 .status-badge.out { background: rgba(100,100,100,0.2); color: var(--text3); }
+.status-badge.finished { background: rgba(0,210,190,0.18); color: var(--accent); }
+
+.mini-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+  padding: 2px 5px; border-radius: 999px;
+}
+.mini-badge.you { background: rgba(0,210,190,0.15); color: var(--accent); }
+.mini-badge.ai { background: rgba(255,255,255,0.08); color: var(--text2); }
+.mini-badge.human { background: rgba(77,166,255,0.18); color: #7eb7ff; }
 
 .lap-invalid { color: var(--yellow); }
 
@@ -362,27 +372,30 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   margin: 0 auto;
   user-select: none;
 }
-.f1-car-wrap.compact { max-width: 155px; }
+.f1-car-wrap.compact { max-width: 165px; }
 .f1-car-wrap svg {
   width: 100%;
   height: auto;
   display: block;
+  overflow: visible;
+  filter: drop-shadow(0 14px 22px rgba(0,0,0,0.28));
 }
 .veh-car-stage {
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: 300px;
+  min-height: 320px;
 }
 .zone-pill {
   position: absolute;
   z-index: 4;
-  padding: 2px 6px;
+  padding: 3px 8px;
   border-radius: 999px;
   border: 1px solid rgba(255,255,255,0.2);
   background: rgba(8,10,14,0.85);
   color: var(--text);
-  font-size: 9px;
+  font-size: 12px;
+  font-weight: 700;
   font-family: 'Consolas', monospace;
   white-space: nowrap;
   backdrop-filter: blur(2px);
@@ -403,7 +416,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 }
 .car-zone-label {
   position: absolute;
-  font-size: 8px;
+  font-size: 11px;
   font-weight: 700;
   color: rgba(255,255,255,0.7);
   text-align: center;
@@ -670,8 +683,20 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .manual-response.hidden { display: none; }
 
 /* ── Settings ─────────────────────────────────────────────────────────────── */
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.settings-column { min-width: 0; }
 .settings-section { margin-bottom: 24px; }
 .settings-section h3 { font-size: 12px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text2); margin-bottom: 12px; }
+.settings-section:last-child { margin-bottom: 0; }
+.settings-section-actions {
+  grid-column: 1 / -1;
+  margin-bottom: 0;
+}
 
 .settings-field { margin-bottom: 12px; }
 .settings-field label { display: block; font-size: 12px; color: var(--text2); margin-bottom: 5px; }
@@ -705,6 +730,25 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 }
 .popout-btn:hover { background: rgba(0,210,190,0.15); color: var(--accent); border-color: var(--accent); }
 
+.page-toolbar {
+  padding: 8px 16px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.page-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.page-toolbar-status {
+  font-size: 11px;
+  color: var(--text2);
+  min-height: 14px;
+}
+
 /* ── Detached window mode ────────────────────────────────────────────────── */
 body.detached #sidebar { display: none; }
 body.detached #content { width: 100vw; }
@@ -712,10 +756,19 @@ body.detached #topbar { padding-left: 16px; }
 
 /* ── Track Map ───────────────────────────────────────────────────────────── */
 #page-trackmap { display: none; }
-#page-trackmap.active { display: flex; gap: 16px; padding: 16px; }
+#page-trackmap.active { display: flex; gap: 16px; padding: 16px; align-items: stretch; height: 100%; }
 
-.trackmap-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.trackmap-sidebar { width: 280px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; flex-shrink: 0; }
+.trackmap-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.trackmap-sidebar {
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+  flex-shrink: 0;
+  align-self: stretch;
+  min-height: 0;
+}
 
 .trackmap-svg-wrap {
   flex: 1; background: var(--bg1); border: 1px solid var(--border);
@@ -738,12 +791,12 @@ body.detached #topbar { padding-left: 16px; }
 }
 
 .car-dot {
-  r: 8; stroke-width: 3; cursor: pointer;
-  filter: drop-shadow(0 0 4px currentColor);
+  r: 6.25; stroke: rgba(8,12,18,0.85); stroke-width: 1.35; cursor: pointer;
+  filter: drop-shadow(0 0 3px currentColor);
   transition: r 0.15s;
 }
-.car-dot:hover { r: 9; }
-.car-dot.player-dot { r: 8; stroke-width: 3; }
+.car-dot:hover { r: 7.1; }
+.car-dot.player-dot { r: 6.9; stroke: #f4f8ff; stroke-width: 1.9; }
 
 .car-label {
   font-size: 9px; font-weight: 700; fill: white;
@@ -755,11 +808,13 @@ body.detached #topbar { padding-left: 16px; }
 
 .trackmap-car-list {
   background: var(--bg1); border: 1px solid var(--border);
-  border-radius: var(--radius); overflow-y: auto; flex: 1;
+  border-radius: var(--radius); overflow-y: auto; flex: 1; min-height: 0;
 }
+.trackmap-car-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 
 .trackmap-car-item {
-  display: flex; align-items: center; gap: 8px;
+  display: grid; grid-template-columns: 24px 10px minmax(0,1fr); gap: 8px;
+  align-items: center;
   padding: 6px 12px; border-bottom: 1px solid var(--border);
   font-size: 12px;
 }
@@ -767,9 +822,14 @@ body.detached #topbar { padding-left: 16px; }
 .trackmap-car-item.player { background: rgba(0,210,190,0.06); }
 
 .trackmap-car-dot-legend {
-  width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+  width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.08);
 }
-.trackmap-car-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trackmap-car-main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.trackmap-car-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.trackmap-car-sub { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.trackmap-car-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trackmap-car-ers { font-size: 10px; color: var(--accent2); font-family: 'Consolas', monospace; }
 .trackmap-car-pos { font-weight: 700; width: 24px; text-align: center; color: var(--text); }
 .trackmap-car-gap { font-family: 'Consolas', monospace; font-size: 11px; color: var(--text2); min-width: 60px; text-align: right; }
 
@@ -929,12 +989,14 @@ body.detached #topbar { padding-left: 16px; }
 
 @media (max-width: 900px) {
   .f1-car-wrap.compact { max-width: 145px; }
-  .veh-car-stage { min-height: 240px; }
-  .zone-pill { font-size: 8px; padding: 1px 5px; }
+  .veh-car-stage { min-height: 252px; }
+  .zone-pill { font-size: 10px; padding: 2px 6px; }
   .zone-fl, .zone-fr { top: 80px; }
   .zone-rl, .zone-rr { top: 214px; }
   .vehicle-overview-columns { grid-template-columns: 1fr; }
   .vehicle-overview-col-power { grid-column: auto; }
+  .settings-layout { grid-template-columns: 1fr; }
+  .settings-section-actions { grid-column: auto; }
 }
 
 /* ── AI Mode strip (Engineer page) ─────────────────────────────────────────── */
