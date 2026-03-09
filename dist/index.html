@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Race Engineer</title>
-    <script type="module" crossorigin src="/assets/index-BJpqjwC1.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BWI4RdJk.css">
+    <script type="module" crossorigin src="/assets/index-BA7blGYu.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-D06WIz7S.css">
   </head>
   <body>
     <div id="app">
@@ -25,6 +25,10 @@
             <span class="nav-icon">≡</span>
             <span class="nav-label">Timing Tower</span>
           </a>
+          <a href="#trackmap" class="nav-item" data-page="trackmap">
+            <span class="nav-icon">◉</span>
+            <span class="nav-label">Track Map</span>
+          </a>
           <a href="#vehicle" class="nav-item" data-page="vehicle">
             <span class="nav-icon">◎</span>
             <span class="nav-label">Vehicle Status</span>
@@ -37,6 +41,10 @@
             <span class="nav-icon">✦</span>
             <span class="nav-label">AI Engineer</span>
           </a>
+          <a href="#radio" class="nav-item" data-page="radio">
+            <span class="nav-icon">◈</span>
+            <span class="nav-label">Radio Config</span>
+          </a>
           <a href="#settings" class="nav-item" data-page="settings">
             <span class="nav-icon">⚙</span>
             <span class="nav-label">Settings</span>
@@ -45,7 +53,7 @@
 
         <div class="sidebar-footer">
           <div id="connection-dot" class="conn-dot offline"></div>
-          <span id="connection-label">Offline · UDP :20777</span>
+          <span id="connection-label">Offline - UDP :20777</span>
         </div>
       </aside>
 
@@ -68,9 +76,11 @@
         <div id="pages">
           <div id="page-dashboard" class="page active"></div>
           <div id="page-timing"    class="page"></div>
+          <div id="page-trackmap"  class="page"></div>
           <div id="page-vehicle"   class="page"></div>
           <div id="page-session"   class="page"></div>
           <div id="page-engineer"  class="page"></div>
+          <div id="page-radio"     class="page"></div>
           <div id="page-settings"  class="page"></div>
         </div>
       </main>

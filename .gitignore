@@ -90,3 +90,6 @@ typings/
 
 # Electron-Forge
 out/
+
+# Local-only worker deployment files
+worker/
