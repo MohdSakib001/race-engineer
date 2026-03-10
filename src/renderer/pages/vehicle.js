@@ -196,6 +196,40 @@ export function createVehiclePage(deps) {
               </div>
             </div>
           </div>
+          <div class="panel">
+            <div class="panel-header">Setup</div>
+            <div class="panel-body">
+              <div class="section-title" style="margin-bottom:6px">Aero & Differential</div>
+              <div class="veh-stat"><span class="veh-stat-label">Front Wing</span><span class="veh-stat-value" id="v-cs-front-wing">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Rear Wing</span><span class="veh-stat-value" id="v-cs-rear-wing">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Diff On Throttle</span><span class="veh-stat-value" id="v-cs-on-throttle">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Diff Off Throttle</span><span class="veh-stat-value" id="v-cs-off-throttle">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Next Front Wing</span><span class="veh-stat-value" id="v-cs-next-front-wing">-</span></div>
+
+              <div class="section-title" style="margin:10px 0 6px">Geometry</div>
+              <div class="veh-stat"><span class="veh-stat-label">Front Camber</span><span class="veh-stat-value" id="v-cs-front-camber">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Rear Camber</span><span class="veh-stat-value" id="v-cs-rear-camber">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Front Toe</span><span class="veh-stat-value" id="v-cs-front-toe">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Rear Toe</span><span class="veh-stat-value" id="v-cs-rear-toe">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Front Suspension</span><span class="veh-stat-value" id="v-cs-front-suspension">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Rear Suspension</span><span class="veh-stat-value" id="v-cs-rear-suspension">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Front Anti-Roll Bar</span><span class="veh-stat-value" id="v-cs-front-arb">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Rear Anti-Roll Bar</span><span class="veh-stat-value" id="v-cs-rear-arb">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Front Ride Height</span><span class="veh-stat-value" id="v-cs-front-ride-height">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Rear Ride Height</span><span class="veh-stat-value" id="v-cs-rear-ride-height">-</span></div>
+
+              <div class="section-title" style="margin:10px 0 6px">Brakes & Tyres</div>
+              <div class="veh-stat"><span class="veh-stat-label">Brake Pressure</span><span class="veh-stat-value" id="v-cs-brake-pressure">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Brake Bias</span><span class="veh-stat-value" id="v-cs-brake-bias">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Engine Braking</span><span class="veh-stat-value" id="v-cs-engine-braking">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">RL Tyre Pressure</span><span class="veh-stat-value" id="v-cs-tyre-pressure-rl">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">RR Tyre Pressure</span><span class="veh-stat-value" id="v-cs-tyre-pressure-rr">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">FL Tyre Pressure</span><span class="veh-stat-value" id="v-cs-tyre-pressure-fl">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">FR Tyre Pressure</span><span class="veh-stat-value" id="v-cs-tyre-pressure-fr">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Ballast</span><span class="veh-stat-value" id="v-cs-ballast">-</span></div>
+              <div class="veh-stat"><span class="veh-stat-label">Fuel Load</span><span class="veh-stat-value" id="v-cs-fuel-load">-</span></div>
+            </div>
+          </div>
         </div>
       </div>
     `;
@@ -210,8 +244,47 @@ export function createVehiclePage(deps) {
     });
   }
 
+  function pickSetupValue(setupLike, ...keys) {
+    if (!setupLike) return undefined;
+    for (const key of keys) {
+      if (setupLike[key] != null) return setupLike[key];
+    }
+    return undefined;
+  }
+
+  function normalizeSetup(setupLike) {
+    if (!setupLike || typeof setupLike !== 'object') return null;
+    return {
+      frontWing: pickSetupValue(setupLike, 'frontWing', 'm_frontWing'),
+      rearWing: pickSetupValue(setupLike, 'rearWing', 'm_rearWing'),
+      onThrottle: pickSetupValue(setupLike, 'onThrottle', 'm_onThrottle'),
+      offThrottle: pickSetupValue(setupLike, 'offThrottle', 'm_offThrottle'),
+      frontCamber: pickSetupValue(setupLike, 'frontCamber', 'm_frontCamber'),
+      rearCamber: pickSetupValue(setupLike, 'rearCamber', 'm_rearCamber'),
+      frontToe: pickSetupValue(setupLike, 'frontToe', 'm_frontToe'),
+      rearToe: pickSetupValue(setupLike, 'rearToe', 'm_rearToe'),
+      frontSuspension: pickSetupValue(setupLike, 'frontSuspension', 'm_frontSuspension'),
+      rearSuspension: pickSetupValue(setupLike, 'rearSuspension', 'm_rearSuspension'),
+      frontAntiRollBar: pickSetupValue(setupLike, 'frontAntiRollBar', 'm_frontAntiRollBar'),
+      rearAntiRollBar: pickSetupValue(setupLike, 'rearAntiRollBar', 'm_rearAntiRollBar'),
+      frontSuspensionHeight: pickSetupValue(setupLike, 'frontSuspensionHeight', 'm_frontSuspensionHeight'),
+      rearSuspensionHeight: pickSetupValue(setupLike, 'rearSuspensionHeight', 'm_rearSuspensionHeight'),
+      brakePressure: pickSetupValue(setupLike, 'brakePressure', 'm_brakePressure'),
+      brakeBias: pickSetupValue(setupLike, 'brakeBias', 'm_brakeBias'),
+      engineBraking: pickSetupValue(setupLike, 'engineBraking', 'm_engineBraking'),
+      rearLeftTyrePressure: pickSetupValue(setupLike, 'rearLeftTyrePressure', 'm_rearLeftTyrePressure'),
+      rearRightTyrePressure: pickSetupValue(setupLike, 'rearRightTyrePressure', 'm_rearRightTyrePressure'),
+      frontLeftTyrePressure: pickSetupValue(setupLike, 'frontLeftTyrePressure', 'm_frontLeftTyrePressure'),
+      frontRightTyrePressure: pickSetupValue(setupLike, 'frontRightTyrePressure', 'm_frontRightTyrePressure'),
+      ballast: pickSetupValue(setupLike, 'ballast', 'm_ballast'),
+      fuelLoad: pickSetupValue(setupLike, 'fuelLoad', 'm_fuelLoad'),
+      nextFrontWingValue: pickSetupValue(setupLike, 'nextFrontWingValue', 'm_nextFrontWingValue'),
+    };
+  }
+
   function updateVehicle() {
     const tel = state.telemetry;
+    const setup = state.setup;
     const sts = state.status;
     const dmg = state.damage;
     if (!tel) return;
@@ -295,6 +368,62 @@ export function createVehiclePage(deps) {
       if (tyreAge) tyreAge.textContent = sts.tyresAgeLaps != null ? sts.tyresAgeLaps + ' laps' : '';
       const fittedAge = el('v-setup-fitted-age');
       if (fittedAge) fittedAge.textContent = sts.tyresFitted != null ? (sts.tyresFitted ? 'Fitted' : 'Not fitted') : '';
+    }
+
+    {
+      const setupFromAll = Array.isArray(state.allCarSetup)
+        ? state.allCarSetup[state.playerCarIndex]
+        : null;
+
+      const normalizedSetup = normalizeSetup(setup)
+      const effectiveSetup = normalizedSetup || {
+        brakeBias: sts?.frontBrakeBias,
+        rearLeftTyrePressure: tel?.tyrePressure?.[0],
+        rearRightTyrePressure: tel?.tyrePressure?.[1],
+        frontLeftTyrePressure: tel?.tyrePressure?.[2],
+        frontRightTyrePressure: tel?.tyrePressure?.[3],
+        fuelLoad: sts?.fuelInTank,
+      };
+      const pct = (value) => Number.isFinite(value) ? `${value}%` : '-';
+      const intVal = (value) => Number.isFinite(value) ? String(value) : '-';
+      const pressure = (value) => Number.isFinite(value) ? `${value.toFixed(1)} PSI` : '-';
+      const fixed = (value, digits = 2) => Number.isFinite(value) ? value.toFixed(digits) : '-';
+      const setSetupValue = (id, value) => {
+        const field = el(id);
+        if (field) field.textContent = value;
+      };
+
+      setSetupValue('v-cs-front-wing', intVal(effectiveSetup.frontWing));
+      setSetupValue('v-cs-rear-wing', intVal(effectiveSetup.rearWing));
+      setSetupValue('v-cs-on-throttle', pct(effectiveSetup.onThrottle));
+      setSetupValue('v-cs-off-throttle', pct(effectiveSetup.offThrottle));
+      setSetupValue(
+        'v-cs-next-front-wing',
+        Number.isFinite(effectiveSetup.nextFrontWingValue)
+          ? effectiveSetup.nextFrontWingValue.toFixed(1)
+          : Number.isFinite(effectiveSetup.frontWing)
+            ? String(effectiveSetup.frontWing)
+            : '-',
+      );
+      setSetupValue('v-cs-front-camber', fixed(effectiveSetup.frontCamber, 2));
+      setSetupValue('v-cs-rear-camber', fixed(effectiveSetup.rearCamber, 2));
+      setSetupValue('v-cs-front-toe', fixed(effectiveSetup.frontToe, 3));
+      setSetupValue('v-cs-rear-toe', fixed(effectiveSetup.rearToe, 3));
+      setSetupValue('v-cs-front-suspension', intVal(effectiveSetup.frontSuspension));
+      setSetupValue('v-cs-rear-suspension', intVal(effectiveSetup.rearSuspension));
+      setSetupValue('v-cs-front-arb', intVal(effectiveSetup.frontAntiRollBar));
+      setSetupValue('v-cs-rear-arb', intVal(effectiveSetup.rearAntiRollBar));
+      setSetupValue('v-cs-front-ride-height', intVal(effectiveSetup.frontSuspensionHeight));
+      setSetupValue('v-cs-rear-ride-height', intVal(effectiveSetup.rearSuspensionHeight));
+      setSetupValue('v-cs-brake-pressure', pct(effectiveSetup.brakePressure));
+      setSetupValue('v-cs-brake-bias', pct(effectiveSetup.brakeBias));
+      setSetupValue('v-cs-engine-braking', pct(effectiveSetup.engineBraking));
+      setSetupValue('v-cs-tyre-pressure-rl', pressure(effectiveSetup.rearLeftTyrePressure));
+      setSetupValue('v-cs-tyre-pressure-rr', pressure(effectiveSetup.rearRightTyrePressure));
+      setSetupValue('v-cs-tyre-pressure-fl', pressure(effectiveSetup.frontLeftTyrePressure));
+      setSetupValue('v-cs-tyre-pressure-fr', pressure(effectiveSetup.frontRightTyrePressure));
+      setSetupValue('v-cs-ballast', intVal(effectiveSetup.ballast));
+      setSetupValue('v-cs-fuel-load', Number.isFinite(effectiveSetup.fuelLoad) ? `${effectiveSetup.fuelLoad.toFixed(1)} kg` : '-');
     }
 
     const posKeys = ['RL', 'RR', 'FL', 'FR'];

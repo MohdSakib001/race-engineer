@@ -5,6 +5,7 @@ export const LAP_DATA_SIZE = 57;
 export const CAR_TELEMETRY_SIZE = 60;
 export const CAR_STATUS_SIZE = 55;
 export const CAR_DAMAGE_SIZE = 46;
+export const CAR_SETUP_SIZE = 50;
 export const PARTICIPANT_SIZE = 57;
 export const LAP_HISTORY_SIZE = 14;
 
@@ -16,6 +17,8 @@ export function createTelemetryState() {
     carTelemetry: null,
     carStatus: null,
     carDamage: null,
+    carSetup: null,
+    nextFrontWingValue: null,
     playerCarIndex: 0,
     bestLapTimes: {},
     fastestLap: null,
@@ -208,6 +211,54 @@ export function parseCarTelemetry(msg) {
     }
   }
   return cars;
+}
+
+export function parseCarSetup(msg) {
+  const d = PACKET_HEADER_SIZE;
+  const cars = [];
+  for (let i = 0; i < MAX_CARS; i++) {
+    const o = d + i * CAR_SETUP_SIZE;
+    if (o + CAR_SETUP_SIZE > msg.length) break;
+    try {
+      cars.push({
+        frontWing: msg.readUInt8(o + 0),
+        rearWing: msg.readUInt8(o + 1),
+        onThrottle: msg.readUInt8(o + 2),
+        offThrottle: msg.readUInt8(o + 3),
+        frontCamber: msg.readFloatLE(o + 4),
+        rearCamber: msg.readFloatLE(o + 8),
+        frontToe: msg.readFloatLE(o + 12),
+        rearToe: msg.readFloatLE(o + 16),
+        frontSuspension: msg.readUInt8(o + 20),
+        rearSuspension: msg.readUInt8(o + 21),
+        frontAntiRollBar: msg.readUInt8(o + 22),
+        rearAntiRollBar: msg.readUInt8(o + 23),
+        frontSuspensionHeight: msg.readUInt8(o + 24),
+        rearSuspensionHeight: msg.readUInt8(o + 25),
+        brakePressure: msg.readUInt8(o + 26),
+        brakeBias: msg.readUInt8(o + 27),
+        engineBraking: msg.readUInt8(o + 28),
+        rearLeftTyrePressure: msg.readFloatLE(o + 29),
+        rearRightTyrePressure: msg.readFloatLE(o + 33),
+        frontLeftTyrePressure: msg.readFloatLE(o + 37),
+        frontRightTyrePressure: msg.readFloatLE(o + 41),
+        ballast: msg.readUInt8(o + 45),
+        fuelLoad: msg.readFloatLE(o + 46),
+      });
+    } catch {
+      cars.push(null);
+    }
+  }
+
+  const nextFrontWingOffset = d + MAX_CARS * CAR_SETUP_SIZE;
+  const nextFrontWingValue = msg.length >= nextFrontWingOffset + 4
+    ? msg.readFloatLE(nextFrontWingOffset)
+    : null;
+
+  return {
+    carSetups: cars,
+    nextFrontWingValue,
+  };
 }
 
 export function parseCarStatus(msg) {

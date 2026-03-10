@@ -1,12 +1,37 @@
 import { defineConfig } from 'vite';
-import { config as dotenvConfig } from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import fs from 'node:fs';
+
+function parseEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const result = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) continue;
+    const key = match[1];
+    let value = match[2] ?? '';
+    const quote = value[0];
+    if ((quote === '"' || quote === '\'' || quote === '`') && value.endsWith(quote)) {
+      value = value.slice(1, -1);
+    } else {
+      value = value.replace(/\s+#.*$/, '');
+    }
+    value = value
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\r')
+      .trim();
+    result[key] = value;
+  }
+  return result;
+}
 
 // Load .env at BUILD TIME (runs in Node during vite build, not in Electron)
 const envPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '.env');
-const envResult = dotenvConfig({ path: envPath });
-const env = envResult.parsed || {};
+const env = parseEnvFile(envPath);
 
 // Inject env vars at build time using Vite `define`.
 // In source code, use __ENV__.KEY instead of process.env.KEY.
@@ -38,7 +63,9 @@ export default defineConfig({
   },
   build: {
     rollupOptions: {
-      external: [...builtins, '@anthropic-ai/sdk', 'edge-tts-universal', 'ws'],
+      // Keep only Node/Electron builtins external.
+      // App deps must be bundled because packaged app.asar has no node_modules folder.
+      external: [...builtins],
     },
   },
 });

@@ -12,8 +12,10 @@ export function createAppState() {
     participants: null,
     lapData: null,
     telemetry: null,
+    setup: null,
     status: null,
     damage: null,
+    allCarSetup: null,
     allCarStatus: null,
     allCarTelemetry: null,
     playerCarIndex: 0,
@@ -187,4 +189,3 @@ export function createTtsState() {
     lastQueuedAt: 0,
   };
 }
-

@@ -18,6 +18,10 @@ export function createAutoRadioFeature(deps) {
     getTrackProximityMeters,
     isTrackLikeSurface,
     isTelemetryOffTrack,
+    isActiveRunningCar,
+    hasPlayerTrackContext,
+    shouldSpeakBattleBattery,
+    getAdjacentRunningCars,
     handleFinishedRaceRadioState,
     fmt,
   } = deps;
@@ -628,7 +632,6 @@ export function createAutoRadioFeature(deps) {
     const myTelemetry = state.telemetry || state.allCarTelemetry?.[state.playerCarIndex];
     if (!ses || !lap || !myTelemetry || !hasPlayerTrackContext(ses, lap, myTelemetry)) return;
     if (ses.safetyCarStatus && ses.safetyCarStatus !== 0) return;
-    const myPos = lap.carPosition;
     const mySpeed = myTelemetry.speed || 0;
     const playerOnStraight = mySpeed >= 180
       && (myTelemetry.throttle || 0) >= 0.92
@@ -649,22 +652,25 @@ export function createAutoRadioFeature(deps) {
       const rivalBrake = rivalTelemetry.brake || 0;
       const rivalSteer = Math.abs(rivalTelemetry.steer || 0);
       const sameLapWindow = Math.abs((rivalLap.currentLapNum || 0) - (lap.currentLapNum || 0)) <= 1;
-      const rivalRollingSlowOnStraight =
-        rivalBrake <= 0.08 &&
-        rivalSteer <= 0.16 &&
-        (
-          rivalSpeed < 100 ||
-          (rivalThrottle < 0.82 && mySpeed >= rivalSpeed + 30) ||
-          (mySpeed >= 220 && rivalSpeed <= mySpeed - 45)
-        );
+      const relativeSpeed = mySpeed - rivalSpeed;
+      const closingSpeedMps = relativeSpeed > 0 ? relativeSpeed / 3.6 : 0;
+      const timeToCatchSec = (aheadMeters != null && closingSpeedMps > 0.1)
+        ? (aheadMeters / closingSpeedMps)
+        : Number.POSITIVE_INFINITY;
+      const rivalHasMajorIssue = rivalSpeed < 90 || rivalThrottle < 0.45 || rivalBrake > 0.18;
+      const rivalStableLine = rivalSteer <= 0.2;
+      const bigHazardAhead = rivalStableLine && (
+        (relativeSpeed >= 60 && aheadMeters != null && aheadMeters <= 350)
+        || (relativeSpeed >= 45 && timeToCatchSec <= 5 && rivalHasMajorIssue)
+      );
       if (
         slowCarCall == null &&
         playerOnStraight &&
         aheadMeters != null &&
         sameLapWindow &&
-        aheadMeters >= 35 &&
-        aheadMeters <= 500 &&
-        rivalRollingSlowOnStraight
+        aheadMeters >= 40 &&
+        aheadMeters <= 260 &&
+        bigHazardAhead
       ) {
         slowCarCall = { distanceMeters: Math.round(aheadMeters / 10) * 10, rivalName };
       }
@@ -687,7 +693,7 @@ export function createAutoRadioFeature(deps) {
     if (slowCarCall) {
       emitLocalRadio(
         'normal',
-        'medium',
+        'high',
         RADIO_MESSAGES.normal_slower_car_ahead(slowCarCall).text,
         'slower_car_ahead',
         { cooldownKey: 'slower_car_ahead' },
@@ -1275,24 +1281,39 @@ export function createAutoRadioFeature(deps) {
     const pitStatus = lap.pitStatus; // 0=none, 1=pitting, 2=in pit
     const lastLapMs  = lap.lastLapTimeMs;
     const allLaps    = state.lapData || [];
-    // Detect outlap (just exited pits, driverStatus=5 is out-lap in F1)
-    // pitStatus transitions from 1/2  0 means just left pits
+    function isQualifyingRunLap(lapEntry) {
+      if (!lapEntry || lapEntry.pitStatus !== 0 || lapEntry.driverStatus === 0) return false;
+      // F1 packets: 1=flying lap, 4=on track. Treat both as "on run".
+      if (lapEntry.driverStatus === 1) return true;
+      return lapEntry.driverStatus === 4 && lapEntry.currentLapTimeMs > 15000 && !lapEntry.currentLapInvalid;
+    }
+    // Detect outlap: pitStatus transitions from 1/2 to 0.
     const wasInPit = radio.prev.pitStatus >= 1;
     const nowOutOfPit = pitStatus === 0;
     const justExited = wasInPit && nowOutOfPit;
     if (justExited) {
-      // Check car behind gap
-      const myPos = lap.carPosition;
-      const behind = allLaps.find(c => c && c.carPosition === myPos + 1);
-      if (behind) {
-        const gapBehind = behind.deltaToCarAheadMs / 1000;
-        if (gapBehind < 8 && gapBehind > 0) {
-          emitLocalRadio('normal', 'medium',
-            `Car behind on your outlap, ${gapBehind.toFixed(1)}s back.`,
-            'outlap_traffic');
-        } else {
-          emitLocalRadio('normal', 'low', 'Outlap. Track is clear behind you.', 'outlap_clear');
+      let closestRunBehind = null;
+      for (let idx = 0; idx < allLaps.length; idx++) {
+        if (idx === state.playerCarIndex) continue;
+        const rivalLap = allLaps[idx];
+        if (!isQualifyingRunLap(rivalLap)) continue;
+        const behindMeters = getTrackAheadGapMeters(rivalLap, lap, ses);
+        if (behindMeters == null || behindMeters <= 0 || behindMeters > 700) continue;
+        const rivalSpeed = state.allCarTelemetry?.[idx]?.speed || 0;
+        const referenceSpeedMps = Math.max(rivalSpeed, 140) / 3.6;
+        const gapSec = behindMeters / referenceSpeedMps;
+        if (!(gapSec > 0 && gapSec <= 5)) continue;
+        if (!closestRunBehind || gapSec < closestRunBehind.gapSec) {
+          closestRunBehind = {
+            gapSec,
+            rivalName: state.participants?.participants?.[idx]?.name || `Car ${idx + 1}`,
+          };
         }
+      }
+      if (closestRunBehind) {
+        emitLocalRadio('normal', 'high',
+          `Give way, ${closestRunBehind.rivalName} is on a flying lap ${closestRunBehind.gapSec.toFixed(1)}s behind.`,
+          'outlap_traffic');
       } else {
         emitLocalRadio('normal', 'low', 'Outlap. Track is clear.', 'outlap_clear');
       }
@@ -1317,7 +1338,7 @@ export function createAutoRadioFeature(deps) {
       const myCarPos = lap.carPosition;
       const sessionTypeLabel = { 5:'Q1', 6:'Q2', 7:'Q3', 8:'SQ', 9:'OSQ' }[ses.sessionType] || 'Q';
       let msg = `${sessionTypeLabel} lap complete. P${myCarPos}. Your lap: ${myLapStr}`;
-      if (deltaStr) msg += `. P1: ${p1LapStr} (${deltaStr})`;
+      if (deltaStr && myCarPos !== 1) msg += `. P1: ${p1LapStr} (${deltaStr})`;
       msg += '. Coming in.';
       emitLocalRadio('normal', 'medium', msg, 'qualifying_lap_complete');
     }

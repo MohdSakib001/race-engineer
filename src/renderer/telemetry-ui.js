@@ -39,8 +39,10 @@ export function createTelemetryUiFeature(deps) {
     state.participants = null;
     state.lapData = null;
     state.telemetry = null;
+    state.setup = null;
     state.status = null;
     state.damage = null;
+    state.allCarSetup = null;
     state.allCarStatus = null;
     state.allCarTelemetry = null;
     state.playerCarIndex = 0;
@@ -78,4 +80,3 @@ export function createTelemetryUiFeature(deps) {
     updateTopBar,
   };
 }
-

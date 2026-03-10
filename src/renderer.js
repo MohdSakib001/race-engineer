@@ -381,6 +381,10 @@ const autoRadioFeature = createAutoRadioFeature({
   getTrackProximityMeters,
   isTrackLikeSurface,
   isTelemetryOffTrack,
+  isActiveRunningCar,
+  hasPlayerTrackContext,
+  shouldSpeakBattleBattery,
+  getAdjacentRunningCars,
   handleFinishedRaceRadioState,
   fmt,
 });
@@ -620,14 +624,39 @@ async function init() {
   window.raceEngineer.onSessionUpdate((d) => {
     state.session = d;
     state.playerCarIndex = d.playerCarIndex ?? 0;
+    if (Array.isArray(state.allCarSetup) && state.allCarSetup[state.playerCarIndex]) {
+      state.setup = {
+        ...(state.allCarSetup[state.playerCarIndex] || {}),
+        nextFrontWingValue: state.setup?.nextFrontWingValue,
+      };
+    }
     const dtEl = el('set-detected-track');
     if (dtEl) dtEl.textContent = `${d.trackId}  ${d.trackName || 'Unknown'}`;
   });
-  window.raceEngineer.onLapUpdate((d) => { state.lapData = d.lapData; state.playerCarIndex = d.playerCarIndex ?? 0; });
+  window.raceEngineer.onLapUpdate((d) => {
+    state.lapData = d.lapData;
+    state.playerCarIndex = d.playerCarIndex ?? 0;
+    if (Array.isArray(state.allCarSetup) && state.allCarSetup[state.playerCarIndex]) {
+      state.setup = {
+        ...(state.allCarSetup[state.playerCarIndex] || {}),
+        nextFrontWingValue: state.setup?.nextFrontWingValue,
+      };
+    }
+  });
   window.raceEngineer.onTelemetryUpdate((d) => { state.telemetry = d; });
+  window.raceEngineer.onSetupUpdate((d) => { state.setup = { ...(state.setup || {}), ...(d || {}) }; });
   window.raceEngineer.onStatusUpdate((d) => { state.status = d; });
   window.raceEngineer.onDamageUpdate((d) => { state.damage = d; });
   window.raceEngineer.onParticipantsUpdate((d) => { state.participants = d; });
+  window.raceEngineer.onAllSetupUpdate((d) => {
+    state.allCarSetup = d;
+    if (Array.isArray(d) && d[state.playerCarIndex]) {
+      state.setup = {
+        ...(d[state.playerCarIndex] || {}),
+        nextFrontWingValue: state.setup?.nextFrontWingValue,
+      };
+    }
+  });
   window.raceEngineer.onAllStatusUpdate((d) => { state.allCarStatus = d; });
   window.raceEngineer.onAllTelemetryUpdate((d) => { state.allCarTelemetry = d; });
   window.raceEngineer.onBestLapsUpdate((d) => { state.bestLapTimes = d; });

@@ -8,6 +8,7 @@ import {
   parseSession,
   parseLapData,
   parseParticipants,
+  parseCarSetup,
   parseCarTelemetry,
   parseCarStatus,
   parseCarDamage,
@@ -57,6 +58,18 @@ export function createTelemetryRuntime({ allWindows }) {
     const telemetry = state.carTelemetry?.[state.playerCarIndex];
     if (telemetry) sendToSubscribers(context, 'telemetry-update', telemetry);
     if (state.carTelemetry) sendToSubscribers(context, 'alltelemetry-update', state.carTelemetry);
+  }
+
+  function broadcastSetup(context) {
+    const state = context.state;
+    const setup = state.carSetup?.[state.playerCarIndex];
+    if (setup) {
+      sendToSubscribers(context, 'setup-update', {
+        ...setup,
+        nextFrontWingValue: state.nextFrontWingValue,
+      });
+    }
+    if (state.carSetup) sendToSubscribers(context, 'allsetup-update', state.carSetup);
   }
 
   function broadcastStatus(context) {
@@ -113,6 +126,16 @@ export function createTelemetryRuntime({ allWindows }) {
       const telemetry = state.carTelemetry[state.playerCarIndex];
       if (telemetry) sendToWindow(windowId, 'telemetry-update', telemetry);
       sendToWindow(windowId, 'alltelemetry-update', state.carTelemetry);
+    }
+    if (state.carSetup) {
+      const setup = state.carSetup[state.playerCarIndex];
+      if (setup) {
+        sendToWindow(windowId, 'setup-update', {
+          ...setup,
+          nextFrontWingValue: state.nextFrontWingValue,
+        });
+      }
+      sendToWindow(windowId, 'allsetup-update', state.carSetup);
     }
     if (state.carStatus) {
       const status = state.carStatus[state.playerCarIndex];
@@ -187,6 +210,15 @@ export function createTelemetryRuntime({ allWindows }) {
             if (participants) {
               state.participants = participants;
               broadcastParticipants(context);
+            }
+            break;
+          }
+          case 5: {
+            const setupData = parseCarSetup(msg);
+            if (setupData?.carSetups) {
+              state.carSetup = setupData.carSetups;
+              state.nextFrontWingValue = setupData.nextFrontWingValue;
+              broadcastSetup(context);
             }
             break;
           }
@@ -345,4 +377,3 @@ export function createTelemetryRuntime({ allWindows }) {
     dispose,
   };
 }
-
