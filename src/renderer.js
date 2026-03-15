@@ -4,6 +4,8 @@ import { RADIO_CATEGORIES, getDefaultRadioConfig, RADIO_MESSAGES, countAiEnabled
 import f1CarSvg from './assets/f1-car.svg?raw';
 import { createDashboardPage } from './renderer/pages/dashboard.js';
 import { createTimingPage } from './renderer/pages/timing.js';
+import { createAnalysisPage } from './renderer/pages/analysis.js';
+import { createLapHistoryPage } from './renderer/pages/lap-history.js';
 import { createTrackMapPage } from './renderer/pages/trackmap.js';
 import { createVehiclePage } from './renderer/pages/vehicle.js';
 import { createSessionPage } from './renderer/pages/session.js';
@@ -14,6 +16,7 @@ import { createEngineerAudioFeature } from './renderer/features/engineer-audio/i
 import { createPaymentFeature } from './renderer/features/payment/index.js';
 import { createTimingExportFeature } from './renderer/features/timing-export/index.js';
 import { createAutoRadioFeature } from './renderer/features/auto-radio/index.js';
+import { createRaceAnalysisFeature } from './renderer/features/race-analysis/index.js';
 import { createTelemetryUiFeature } from './renderer/telemetry-ui.js';
 import { createDetachContext } from './renderer/detach.js';
 import { DEFAULT_LISTEN_PORT, normalizeListenPort, createAppState, createLicenseState, createGptRealtimeState, createPayPalCheckoutState, createRadioState, normalizeRadioConfig, TTS_VOICES, createTtsState } from './renderer/runtime-state.js';
@@ -127,6 +130,25 @@ function buildTimingExportRows() { return timingExportFeature.buildTimingExportR
 function buildTimingExportCsv() { return timingExportFeature.buildTimingExportCsv(); }
 function buildTimingExportJson() { return timingExportFeature.buildTimingExportJson(); }
 async function exportTimingData(format = 'csv') { return timingExportFeature.exportTimingData(format); }
+const raceAnalysisFeature = createRaceAnalysisFeature({
+  state,
+  windowApi: window.raceEngineer,
+  isPrimaryWindow: !DETACH_PAGE,
+});
+const {
+  restoreDraft: restoreRaceAnalysisDraft,
+  setRecentSnapshots: setRaceAnalysisSnapshots,
+  setPitLossEstimate: setRaceAnalysisPitLossEstimate,
+  setStorageConfig: setRaceAnalysisStorageConfig,
+  handleSessionUpdate: handleRaceAnalysisSessionUpdate,
+  handleSetupUpdate: handleRaceAnalysisSetupUpdate,
+  handleStatusUpdate: handleRaceAnalysisStatusUpdate,
+  handleLapUpdate: handleRaceAnalysisLapUpdate,
+  handleTelemetryUpdate: handleRaceAnalysisTelemetryUpdate,
+  handleDamageUpdate: handleRaceAnalysisDamageUpdate,
+  saveSnapshot: saveRaceAnalysisSnapshot,
+  queueDraftSave: queueRaceAnalysisDraftSave,
+} = raceAnalysisFeature;
 function fmtCountdown(sec) { return fmtCountdownUtil(sec); }
 function clamp(v, min, max) { return clampUtil(v, min, max); }
 function tyreClass(tempC) { return tyreClassUtil(tempC); }
@@ -292,13 +314,16 @@ const dashboardPageModule = createDashboardPage({
   fmt,
   fmtSector,
   computeSector3Time,
+  getRemainingRaceDistanceLaps,
   getBatteryDelta,
   batteryDeltaHTML,
+  setPitLossEstimate: setRaceAnalysisPitLossEstimate,
 });
 const timingPageModule = createTimingPage({
   state,
   el,
   popoutBtn,
+  openPlayerLapHistory: () => window.raceEngineer.openWindow({ page: 'laphistory', title: 'Player Lap History', width: 980, height: 760 }),
   exportTimingData,
   getClassificationCars,
   teamColor,
@@ -308,6 +333,24 @@ const timingPageModule = createTimingPage({
   renderRaceStatusBadge,
   renderControlBadge,
   tyreBadge,
+});
+const lapHistoryPageModule = createLapHistoryPage({
+  state,
+  el,
+  fmt,
+  fmtSector,
+  tyreCompoundLabel,
+});
+const analysisPageModule = createAnalysisPage({
+  state,
+  el,
+  fmt,
+  fmtSector,
+  getClassificationCars,
+  getRemainingRaceDistanceLaps,
+  tyreCompoundLabel,
+  saveSnapshot: saveRaceAnalysisSnapshot,
+  setPitLossEstimate: setRaceAnalysisPitLossEstimate,
 });
 const trackMapPageModule = createTrackMapPage({
   state,
@@ -347,6 +390,8 @@ const telemetryUiFeature = createTelemetryUiFeature({
   DETACH_PAGE,
   dashboardPageModule,
   timingPageModule,
+  lapHistoryPageModule,
+  analysisPageModule,
   trackMapPageModule,
   vehiclePageModule,
   sessionPageModule,
@@ -471,6 +516,8 @@ function tick() {
   updateTopBar();
   if (activePage === 'page-dashboard') dashboardPageModule.updateDashboard();
   if (activePage === 'page-timing')   timingPageModule.updateTiming();
+  if (activePage === 'page-laphistory') lapHistoryPageModule.updateLapHistory();
+  if (activePage === 'page-analysis') analysisPageModule.updateAnalysis();
   if (activePage === 'page-trackmap') trackMapPageModule.updateTrackMap();
   if (activePage === 'page-vehicle')  vehiclePageModule.updateVehicle();
   if (activePage === 'page-session')  sessionPageModule.updateSession();
@@ -514,6 +561,20 @@ async function init() {
   if (saved.openaiApiKey) gptRealtime.openaiApiKey = saved.openaiApiKey;
   if (saved.gptVoice) gptRealtime.voice = saved.gptVoice;
   if (saved.aiMode) gptRealtime.aiMode = saved.aiMode;
+  if (saved.analysis?.pitLossEstimateSec != null) {
+    setRaceAnalysisPitLossEstimate(saved.analysis.pitLossEstimateSec);
+  }
+  if (saved.analysis?.storage) {
+    setRaceAnalysisStorageConfig(saved.analysis.storage);
+  }
+  const savedAnalysisDraft = await window.raceEngineer.loadRaceAnalysisDraft();
+  if (savedAnalysisDraft?.analysis) {
+    restoreRaceAnalysisDraft(savedAnalysisDraft.analysis);
+  }
+  const savedAnalysisSnapshots = await window.raceEngineer.listRaceAnalysisSnapshots();
+  if (Array.isArray(savedAnalysisSnapshots)) {
+    setRaceAnalysisSnapshots(savedAnalysisSnapshots);
+  }
   // Load license
   const lic = await window.raceEngineer.getLicense();
   Object.assign(license, lic);
@@ -526,6 +587,8 @@ async function init() {
     const builders = {
       dashboard: dashboardPageModule.buildDashboard,
       timing: timingPageModule.buildTiming,
+      laphistory: lapHistoryPageModule.buildLapHistory,
+      analysis: analysisPageModule.buildAnalysis,
       trackmap: trackMapPageModule.buildTrackMap,
       vehicle: vehiclePageModule.buildVehicle,
       session: sessionPageModule.buildSession,
@@ -539,6 +602,8 @@ async function init() {
     // Build all pages (main window)
     dashboardPageModule.buildDashboard();
     timingPageModule.buildTiming();
+    lapHistoryPageModule.buildLapHistory();
+    analysisPageModule.buildAnalysis();
     trackMapPageModule.buildTrackMap();
     vehiclePageModule.buildVehicle();
     sessionPageModule.buildSession();
@@ -632,6 +697,7 @@ async function init() {
     }
     const dtEl = el('set-detected-track');
     if (dtEl) dtEl.textContent = `${d.trackId}  ${d.trackName || 'Unknown'}`;
+    handleRaceAnalysisSessionUpdate();
   });
   window.raceEngineer.onLapUpdate((d) => {
     state.lapData = d.lapData;
@@ -642,11 +708,24 @@ async function init() {
         nextFrontWingValue: state.setup?.nextFrontWingValue,
       };
     }
+    handleRaceAnalysisLapUpdate(d.lapData);
   });
-  window.raceEngineer.onTelemetryUpdate((d) => { state.telemetry = d; });
-  window.raceEngineer.onSetupUpdate((d) => { state.setup = { ...(state.setup || {}), ...(d || {}) }; });
-  window.raceEngineer.onStatusUpdate((d) => { state.status = d; });
-  window.raceEngineer.onDamageUpdate((d) => { state.damage = d; });
+  window.raceEngineer.onTelemetryUpdate((d) => {
+    state.telemetry = d;
+    handleRaceAnalysisTelemetryUpdate();
+  });
+  window.raceEngineer.onSetupUpdate((d) => {
+    state.setup = { ...(state.setup || {}), ...(d || {}) };
+    handleRaceAnalysisSetupUpdate(state.setup);
+  });
+  window.raceEngineer.onStatusUpdate((d) => {
+    state.status = d;
+    handleRaceAnalysisStatusUpdate(d);
+  });
+  window.raceEngineer.onDamageUpdate((d) => {
+    state.damage = d;
+    handleRaceAnalysisDamageUpdate();
+  });
   window.raceEngineer.onParticipantsUpdate((d) => { state.participants = d; });
   window.raceEngineer.onAllSetupUpdate((d) => {
     state.allCarSetup = d;
@@ -655,6 +734,7 @@ async function init() {
         ...(d[state.playerCarIndex] || {}),
         nextFrontWingValue: state.setup?.nextFrontWingValue,
       };
+      handleRaceAnalysisSetupUpdate(state.setup);
     }
   });
   window.raceEngineer.onAllStatusUpdate((d) => { state.allCarStatus = d; });
@@ -696,6 +776,9 @@ async function init() {
     refreshLicenseBadges();
   });
   // PayPal redirect — user completed (or cancelled) payment in browser
+  window.addEventListener('beforeunload', () => {
+    queueRaceAnalysisDraftSave().catch(() => {});
+  }, { once: true });
   window.raceEngineer.onStripeReturn(async (data) => {
     if (!data.success) {
       appendRadioCard('system', 'low', `${getPaymentProviderLabel(data.provider || paypalCheckout.pendingOrder?.provider)} payment cancelled.`, true);

@@ -8,8 +8,10 @@ export function createDashboardPage(deps) {
     fmt,
     fmtSector,
     computeSector3Time,
+    getRemainingRaceDistanceLaps,
     getBatteryDelta,
     batteryDeltaHTML,
+    setPitLossEstimate,
   } = deps;
 
   function buildDashboard() {
@@ -59,19 +61,29 @@ export function createDashboardPage(deps) {
         <div class="grid-2">
           <div style="display:flex;flex-direction:column;gap:12px">
             <div class="panel">
-              <div class="panel-header">Fuel</div>
+              <div class="panel-header">Fuel Window</div>
               <div class="panel-body">
                 <div class="stat-row"><span class="stat-label">In tank</span><span class="stat-value" id="d-fuel"> kg</span></div>
                 <div class="stat-row"><span class="stat-label">Laps remaining</span><span class="stat-value" id="d-fuel-laps"></span></div>
+                <div class="stat-row"><span class="stat-label">Start fuel</span><span class="stat-value mono" id="d-start-fuel">-</span></div>
+                <div class="stat-row"><span class="stat-label">Projected finish</span><span class="stat-value mono" id="d-finish-fuel">-</span></div>
+                <div class="stat-row"><span class="stat-label">Fuel delta</span><span class="stat-value mono" id="d-fuel-delta">-</span></div>
                 <div class="prog-bar" style="margin-top:10px"><div class="prog-fill fuel" id="d-fuel-bar" style="width:0%"></div></div>
               </div>
             </div>
             <div class="panel">
-              <div class="panel-header">Gap Analysis</div>
+              <div class="panel-header">Gap / Pit Window</div>
               <div class="panel-body">
                 <div class="stat-row"><span class="stat-label">Gap to car ahead</span><span class="stat-value mono" id="d-gap-ahead"></span></div>
+                <div class="stat-row"><span class="stat-label">Gap to car behind</span><span class="stat-value mono" id="d-gap-behind"></span></div>
                 <div class="stat-row"><span class="stat-label">Gap to leader</span><span class="stat-value mono" id="d-gap-leader"></span></div>
                 <div class="stat-row"><span class="stat-label">DRS</span><span class="stat-value" id="d-drs-status"></span></div>
+                <div class="settings-field" style="margin-top:10px">
+                  <label>Pit loss estimate (seconds)</label>
+                  <input type="number" class="settings-input" id="d-pit-loss-input" min="5" max="120" step="0.5">
+                </div>
+                <div class="stat-row"><span class="stat-label">Projected rejoin</span><span class="stat-value mono" id="d-rejoin-pos">-</span></div>
+                <div class="analysis-inline-note" id="d-pit-note">Waiting for race gaps.</div>
                 <div id="d-gap-indicator" class="gap-indicator" style="margin-top:8px"></div>
               </div>
             </div>
@@ -113,6 +125,7 @@ export function createDashboardPage(deps) {
                   </div>
                   <div class="tyre-label">${pos}</div>
                   <div class="tyre-wear" id="tw-${pos}">wear: %</div>
+                  <div class="tyre-core" id="tcore-${pos}">carcass/core: -</div>
                 </div>`).join('')}
             </div>
           </div>
@@ -140,6 +153,14 @@ export function createDashboardPage(deps) {
         </div>
       </div>
     `;
+
+    el('d-pit-loss-input')?.addEventListener('change', () => {
+      const input = el('d-pit-loss-input');
+      setPitLossEstimate(input?.value);
+      if (input) input.value = String(state.analysis?.pitLossEstimateSec ?? 22);
+    });
+    const pitLossInput = el('d-pit-loss-input');
+    if (pitLossInput) pitLossInput.value = String(state.analysis?.pitLossEstimateSec ?? 22);
   }
 
   function updateDashboard() {
@@ -190,11 +211,14 @@ export function createDashboardPage(deps) {
     const tyreOrder = { RL: 0, RR: 1, FL: 2, FR: 3 };
     for (const [pos, idx] of Object.entries(tyreOrder)) {
       const temp = tel.tyreSurfaceTemp[idx];
+      const coreTemp = tel.tyreInnerTemp?.[idx];
       const circle = el(`tc-${pos}`);
       if (circle) {
         circle.className = `tyre-circle ${tyreClass(temp)}`;
         el(`tt-${pos}`).textContent = temp;
       }
+      const coreEl = el(`tcore-${pos}`);
+      if (coreEl) coreEl.textContent = Number.isFinite(coreTemp) ? `carcass/core: ${coreTemp}C` : 'carcass/core: -';
       if (dmg) {
         const wear = Math.round(dmg.tyresWear[idx]);
         el(`tw-${pos}`).textContent = `wear: ${wear}%`;
@@ -206,6 +230,34 @@ export function createDashboardPage(deps) {
       el('d-fuel').textContent = sts.fuelInTank.toFixed(2) + ' kg';
       el('d-fuel-laps').textContent = sts.fuelRemainingLaps.toFixed(1);
       el('d-fuel-bar').style.width = fuelPct + '%';
+
+      const completedLaps = Array.isArray(state.analysis?.completedLaps) ? state.analysis.completedLaps : [];
+      const validFuelBurns = completedLaps
+        .map((entry) => entry?.fuelUsedKg)
+        .filter((value) => Number.isFinite(value) && value > 0 && value < 10);
+      const avgFuelPerLap = validFuelBurns.length
+        ? validFuelBurns.reduce((sum, value) => sum + value, 0) / validFuelBurns.length
+        : null;
+      const startFuelKg = Number.isFinite(state.analysis?.startFuelKg)
+        ? state.analysis.startFuelKg
+        : Number.isFinite(state.setup?.fuelLoad)
+          ? state.setup.fuelLoad
+          : sts.fuelInTank;
+      const remainingRaceLaps = getRemainingRaceDistanceLaps(state.session, lap);
+      let projectedFinishFuel = null;
+      if (Number.isFinite(avgFuelPerLap)) {
+        projectedFinishFuel = sts.fuelInTank - (avgFuelPerLap * remainingRaceLaps);
+      } else if (sts.fuelRemainingLaps > 0) {
+        const derivedFuelPerLap = sts.fuelInTank / sts.fuelRemainingLaps;
+        projectedFinishFuel = sts.fuelInTank - (derivedFuelPerLap * remainingRaceLaps);
+      }
+      el('d-start-fuel').textContent = Number.isFinite(startFuelKg) ? `${startFuelKg.toFixed(2)} kg` : '-';
+      el('d-finish-fuel').textContent = Number.isFinite(projectedFinishFuel) ? `${projectedFinishFuel.toFixed(2)} kg` : '-';
+      const fuelDeltaEl = el('d-fuel-delta');
+      if (fuelDeltaEl) {
+        fuelDeltaEl.textContent = Number.isFinite(projectedFinishFuel) ? `${projectedFinishFuel >= 0 ? '+' : ''}${projectedFinishFuel.toFixed(2)} kg` : '-';
+        fuelDeltaEl.className = `stat-value mono ${Number.isFinite(projectedFinishFuel) ? (projectedFinishFuel >= 0 ? 'text-good' : 'text-bad') : ''}`;
+      }
 
       const ersPct = clamp((sts.ersStoreEnergy / 4000000) * 100, 0, 100);
       el('d-ers').textContent = (sts.ersStoreEnergy / 1000000).toFixed(2) + ' MJ';
@@ -255,6 +307,45 @@ export function createDashboardPage(deps) {
         } else {
           gapAheadEl.textContent = 'Leader';
           gapAheadEl.className = 'stat-value mono';
+        }
+      }
+
+      const pitLossInput = el('d-pit-loss-input');
+      if (pitLossInput && pitLossInput.value !== String(state.analysis?.pitLossEstimateSec ?? 22)) {
+        pitLossInput.value = String(state.analysis?.pitLossEstimateSec ?? 22);
+      }
+      const carBehind = state.lapData?.find((entry) => entry?.carPosition === lap.carPosition + 1);
+      const gapBehindMs = Number(carBehind?.deltaToCarAheadMs) || 0;
+      const gapBehindEl = el('d-gap-behind');
+      if (gapBehindEl) {
+        gapBehindEl.textContent = gapBehindMs > 0 ? `+${(gapBehindMs / 1000).toFixed(2)}s` : '-';
+      }
+      const playerLeaderGap = lap.carPosition === 1 ? 0 : (Number(lap.deltaToLeaderMs) || 0);
+      const pitLossMs = (state.analysis?.pitLossEstimateSec ?? 22) * 1000;
+      const projectedLosses = (state.lapData || []).filter((entry) => {
+        if (!entry || entry.carPosition <= lap.carPosition || entry.carPosition <= 0) return false;
+        const carGapMs = lap.carPosition === 1
+          ? (Number(entry.deltaToLeaderMs) || 0)
+          : (Number(entry.deltaToLeaderMs) || 0) - playerLeaderGap;
+        return carGapMs > 0 && carGapMs < pitLossMs;
+      }).length;
+      const classifiedCars = (state.lapData || []).filter((entry) => entry?.carPosition > 0).length || lap.carPosition;
+      const rejoinEl = el('d-rejoin-pos');
+      if (rejoinEl) rejoinEl.textContent = `P${Math.min(classifiedCars, lap.carPosition + projectedLosses)}`;
+      const pitNoteEl = el('d-pit-note');
+      if (pitNoteEl) {
+        if (gapBehindMs <= 0) {
+          pitNoteEl.textContent = 'Waiting for a stable gap behind.';
+          pitNoteEl.className = 'analysis-inline-note';
+        } else {
+          const gapDeltaSec = (gapBehindMs - pitLossMs) / 1000;
+          if (gapDeltaSec >= 0) {
+            pitNoteEl.textContent = `Free stop margin: ${gapDeltaSec.toFixed(2)}s.`;
+            pitNoteEl.className = 'analysis-inline-note text-good';
+          } else {
+            pitNoteEl.textContent = `Pit loss exceeds the gap behind by ${Math.abs(gapDeltaSec).toFixed(2)}s.`;
+            pitNoteEl.className = 'analysis-inline-note text-bad';
+          }
         }
       }
 

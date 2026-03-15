@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SVG Inspect</title>
+  <style>
+    body { margin: 0; font-family: Consolas, monospace; background: #111; color: #eee; }
+    .wrap { display: grid; grid-template-columns: 560px 1fr; gap: 16px; padding: 16px; align-items: start; }
+    object, svg { width: 520px; height: 1100px; background: #fff; border: 1px solid #333; }
+    table { border-collapse: collapse; width: 100%; font-size: 12px; }
+    th, td { border: 1px solid #333; padding: 4px 6px; text-align: left; }
+    tr:hover { background: #1e1e1e; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div><object id="svg-object" type="image/svg+xml" data="file:///D:/Github/race-engineer/src/assets/f1-car.svg"></object></div>
+    <div>
+      <table>
+        <thead>
+          <tr>
+            <th>i</th>
+            <th>fill</th>
+            <th>x</th>
+            <th>y</th>
+            <th>w</th>
+            <th>h</th>
+            <th>id</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+  <script>
+    const rows = document.getElementById('rows');
+    const svgObject = document.getElementById('svg-object');
+    svgObject.addEventListener('load', () => {
+      const svg = svgObject.contentDocument.querySelector('svg');
+      const paths = [...svg.querySelectorAll('path')];
+      paths.forEach((path, index) => {
+        const bbox = path.getBBox();
+        const style = path.getAttribute('style') || '';
+        const fillMatch = style.match(/fill:([^;]+)/);
+        const fill = fillMatch ? fillMatch[1].trim() : (path.getAttribute('fill') || '');
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${index}</td>
+          <td>${fill}</td>
+          <td>${bbox.x.toFixed(1)}</td>
+          <td>${bbox.y.toFixed(1)}</td>
+          <td>${bbox.width.toFixed(1)}</td>
+          <td>${bbox.height.toFixed(1)}</td>
+          <td>${path.id || ''}</td>
+        `;
+        rows.appendChild(tr);
+      });
+      document.title = `loaded ${paths.length}`;
+    });
+  </script>
+</body>
+</html>

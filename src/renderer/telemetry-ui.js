@@ -4,6 +4,8 @@ export function createTelemetryUiFeature(deps) {
     DETACH_PAGE,
     dashboardPageModule,
     timingPageModule,
+    lapHistoryPageModule,
+    analysisPageModule,
     trackMapPageModule,
     vehiclePageModule,
     sessionPageModule,
@@ -56,6 +58,8 @@ export function createTelemetryUiFeature(deps) {
     const builders = {
       dashboard: dashboardPageModule.buildDashboard,
       timing: timingPageModule.buildTiming,
+      laphistory: lapHistoryPageModule.buildLapHistory,
+      analysis: analysisPageModule.buildAnalysis,
       trackmap: trackMapPageModule.buildTrackMap,
       vehicle: vehiclePageModule.buildVehicle,
       session: sessionPageModule.buildSession,
@@ -68,6 +72,8 @@ export function createTelemetryUiFeature(deps) {
     }
     dashboardPageModule.buildDashboard();
     timingPageModule.buildTiming();
+    lapHistoryPageModule.buildLapHistory();
+    analysisPageModule.buildAnalysis();
     trackMapPageModule.buildTrackMap();
     vehiclePageModule.buildVehicle();
     sessionPageModule.buildSession();

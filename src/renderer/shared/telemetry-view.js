@@ -40,6 +40,6 @@ export function getTrackMapVisibleCars(lapData) {
   if (!Array.isArray(lapData)) return [];
   return lapData
     .map((car, idx) => ({ ...car, idx }))
-    .filter((car) => car && car.carPosition > 0 && Number.isFinite(car.lapDistance) && car.lapDistance >= 0)
+    .filter((car) => car && car.carPosition > 0 && Number.isFinite(car.lapDistance))
     .sort((a, b) => (a.carPosition || 99) - (b.carPosition || 99));
 }

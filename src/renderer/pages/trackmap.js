@@ -108,7 +108,10 @@ export function createTrackMapPage(deps) {
 
     svg.querySelectorAll('.car-dot, .car-label').forEach((node) => node.remove());
     cars.forEach((car) => {
-      const progress = clamp(car.lapDistance / trackLen, 0, 1);
+      const rawLapDistance = Number.isFinite(car.lapDistance) ? car.lapDistance : car.totalDistance;
+      let normalizedLapDistance = Number.isFinite(rawLapDistance) ? (rawLapDistance % trackLen) : 0;
+      if (normalizedLapDistance < 0) normalizedLapDistance += trackLen;
+      const progress = clamp(normalizedLapDistance / trackLen, 0, 1);
       const pt = pathEl.getPointAtLength(progress * totalLen);
       const p = parts?.participants?.[car.idx];
       const teamId = p?.teamId ?? -1;

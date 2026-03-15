@@ -3,6 +3,7 @@ export function createTimingPage(deps) {
     state,
     el,
     popoutBtn,
+    openPlayerLapHistory,
     exportTimingData,
     getClassificationCars,
     teamColor,
@@ -51,6 +52,11 @@ export function createTimingPage(deps) {
     `;
     el('timing-export-csv')?.addEventListener('click', () => { exportTimingData('csv').catch(() => {}); });
     el('timing-export-json')?.addEventListener('click', () => { exportTimingData('json').catch(() => {}); });
+    el('timing-body')?.addEventListener('click', (event) => {
+      const row = event.target.closest('tr[data-player-history="1"]');
+      if (!row) return;
+      openPlayerLapHistory();
+    });
   }
 
   function updateTiming() {
@@ -106,7 +112,7 @@ export function createTimingPage(deps) {
       const statusCell = renderRaceStatusBadge(car);
       const controlBadge = renderControlBadge(p, isPlayer);
       return `
-        <tr class="${isPlayer ? 'player-row' : ''}${isFastest ? ' fastest-row' : ''}">
+        <tr class="${isPlayer ? 'player-row timing-player-history-row' : ''}${isFastest ? ' fastest-row' : ''}" data-player-history="${isPlayer ? '1' : '0'}" ${isPlayer ? 'title="Open player lap history"' : ''}>
           <td class="pos-cell">${car.carPosition || '-'}</td>
           <td class="driver-cell">
             <span class="team-bar" style="background:${color}"></span>

@@ -82,6 +82,36 @@ export function createSettingsPage(deps) {
             </div>
           </div>
           <div class="settings-section">
+            <h3>Race Analysis & Storage</h3>
+            <div class="panel">
+              <div class="panel-body">
+                <div class="settings-field">
+                  <label>Default Pit Loss Estimate (seconds)</label>
+                  <input type="number" class="settings-input" id="analysis-default-pit-loss" min="5" max="120" step="0.5" value="${state.analysis?.pitLossEstimateSec ?? 22}">
+                </div>
+                <div class="settings-field" style="margin-top:10px">
+                  <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" id="analysis-remote-enabled" ${state.analysis?.storageConfig?.remoteSyncEnabled ? 'checked' : ''}>
+                    Enable Supabase snapshot sync
+                  </label>
+                </div>
+                <div class="settings-field" style="margin-top:10px">
+                  <label>Supabase URL</label>
+                  <input type="text" class="settings-input" id="analysis-supabase-url" placeholder="https://project.supabase.co" value="${state.analysis?.storageConfig?.supabaseUrl || ''}">
+                </div>
+                <div class="settings-field">
+                  <label>Supabase Key</label>
+                  <input type="password" class="settings-input" id="analysis-supabase-key" placeholder="sb_publishable_... or service key" value="${state.analysis?.storageConfig?.supabaseKey || ''}">
+                </div>
+                <div class="settings-field">
+                  <label>Supabase Table</label>
+                  <input type="text" class="settings-input" id="analysis-supabase-table" placeholder="race_analysis_snapshots" value="${state.analysis?.storageConfig?.supabaseTable || 'race_analysis_snapshots'}">
+                </div>
+                <p class="settings-note" style="margin-top:8px">Local draft save always stays on. Supabase sync is optional and only runs when you press Save Snapshot on the Race Analysis page.</p>
+              </div>
+            </div>
+          </div>
+          <div class="settings-section">
             <h3>Classic AI (Claude Opus) - API Key</h3>
             <div class="panel"><div class="panel-body">
               <div class="settings-field">
@@ -157,7 +187,7 @@ export function createSettingsPage(deps) {
           <div style="display:flex;gap:8px;align-items:center">
             <button class="settings-save-btn" id="save-all-settings" style="background:var(--accent)">Save All Settings</button>
           </div>
-          <p class="settings-note" style="margin-top:6px">Saves API keys, TTS config, radio config and AI mode to disk.</p>
+          <p class="settings-note" style="margin-top:6px">Saves API keys, TTS config, radio config, AI mode, and race analysis storage settings to disk.</p>
         </div>
       </div>
     `;
@@ -249,6 +279,15 @@ export function createSettingsPage(deps) {
       if (key) window.raceEngineer.setApiKey(key);
       const openaiKey = el('openai-key-input')?.value.trim();
       if (openaiKey) gptRealtime.openaiApiKey = openaiKey;
+      const analysisPitLoss = parseFloat(el('analysis-default-pit-loss')?.value ?? state.analysis?.pitLossEstimateSec ?? 22);
+      const analysisStorage = {
+        remoteSyncEnabled: !!el('analysis-remote-enabled')?.checked,
+        supabaseUrl: el('analysis-supabase-url')?.value.trim() || '',
+        supabaseKey: el('analysis-supabase-key')?.value.trim() || '',
+        supabaseTable: el('analysis-supabase-table')?.value.trim() || 'race_analysis_snapshots',
+      };
+      if (Number.isFinite(analysisPitLoss)) state.analysis.pitLossEstimateSec = Math.min(120, Math.max(5, analysisPitLoss));
+      state.analysis.storageConfig = analysisStorage;
       window.raceEngineer.saveSettings({
         apiKey: key || undefined,
         openaiApiKey: openaiKey || undefined,
@@ -257,6 +296,10 @@ export function createSettingsPage(deps) {
         telemetryPort: getListenPort(),
         gptVoice: gptRealtime.voice,
         aiMode: gptRealtime.aiMode,
+        analysis: {
+          pitLossEstimateSec: state.analysis.pitLossEstimateSec,
+          storage: analysisStorage,
+        },
       });
       el('save-all-settings').textContent = 'Saved';
       setTimeout(() => { el('save-all-settings').textContent = 'Save All Settings'; }, 2000);
@@ -301,6 +344,10 @@ export function createSettingsPage(deps) {
     const ttsEnabledEl = el('tts-enabled');
     const ttsVoiceEl = el('tts-voice-select');
     const ttsRateEl = el('tts-rate');
+    const analysisRemoteEnabledEl = el('analysis-remote-enabled');
+    const analysisSupabaseUrlEl = el('analysis-supabase-url');
+    const analysisSupabaseKeyEl = el('analysis-supabase-key');
+    const analysisSupabaseTableEl = el('analysis-supabase-table');
     if (ttsEnabledEl) {
       ttsEnabledEl.checked = tts.enabled;
       ttsEnabledEl.addEventListener('change', () => { tts.enabled = ttsEnabledEl.checked; });
@@ -316,6 +363,16 @@ export function createSettingsPage(deps) {
         el('tts-rate-val').textContent = tts.rate.toFixed(1);
       });
     }
+
+    const toggleAnalysisRemoteFields = () => {
+      const enabled = !!analysisRemoteEnabledEl?.checked;
+      [analysisSupabaseUrlEl, analysisSupabaseKeyEl, analysisSupabaseTableEl].forEach((field) => {
+        if (!field) return;
+        field.disabled = !enabled;
+      });
+    };
+    analysisRemoteEnabledEl?.addEventListener('change', toggleAnalysisRemoteFields);
+    toggleAnalysisRemoteFields();
 
     el('tts-test')?.addEventListener('click', () => {
       const wasEnabled = tts.enabled;

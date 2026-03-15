@@ -1,6 +1,8 @@
 const DETACH_TITLES = {
   dashboard: 'Dashboard',
   timing: 'Timing Tower',
+  laphistory: 'Player Lap History',
+  analysis: 'Race Analysis',
   trackmap: 'Track Map',
   vehicle: 'Vehicle Status',
   session: 'Session',
@@ -33,4 +35,3 @@ export function createDetachContext(locationSearch, raceEngineerApi) {
     setDetachedWindowTitle,
   };
 }
-

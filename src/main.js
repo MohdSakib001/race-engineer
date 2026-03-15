@@ -9,6 +9,7 @@ import { IsomorphicCommunicate } from 'edge-tts-universal';
 import { GptRealtimeEngineer } from './gpt-realtime.js';
 import { TRACK_NAMES, SESSION_TYPES, WEATHER, TEAM_COLORS, TYRE_COMPOUNDS, ACTUAL_COMPOUNDS } from './main/lookups.js';
 import { createLicenseRuntime } from './main/license-runtime.js';
+import { createRaceAnalysisStore } from './main/race-analysis-store.js';
 import { createTelemetryRuntime } from './main/telemetry-runtime.js';
 import { registerPaymentAndLicenseIpc } from './main/ipc/payment-license.js';
 import { ENGINEER_SYSTEM_PROMPT } from './main/prompts.js';
@@ -59,6 +60,7 @@ const allWindows = new Set();
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const telemetryRuntime = createTelemetryRuntime({ allWindows });
+const raceAnalysisStore = createRaceAnalysisStore({ app, fs, path });
 const {
   attachWindowToPort,
   getContextForWindow,
@@ -592,6 +594,38 @@ app.whenReady().then(() => {
   // Expose lookup tables to renderer
   ipcMain.handle('get-lookups', () => ({ TRACK_NAMES, SESSION_TYPES, WEATHER, TEAM_COLORS, TYRE_COMPOUNDS, ACTUAL_COMPOUNDS }));
 
+  ipcMain.handle('load-race-analysis-draft', () => {
+    try {
+      return raceAnalysisStore.loadDraft();
+    } catch (error) {
+      return { error: error.message || 'Failed to load race analysis draft.' };
+    }
+  });
+
+  ipcMain.handle('save-race-analysis-draft', (_event, payload = {}) => {
+    try {
+      return raceAnalysisStore.saveDraft(payload);
+    } catch (error) {
+      return { error: error.message || 'Failed to save race analysis draft.' };
+    }
+  });
+
+  ipcMain.handle('list-race-analysis-snapshots', () => {
+    try {
+      return raceAnalysisStore.listSnapshots();
+    } catch (error) {
+      return [];
+    }
+  });
+
+  ipcMain.handle('save-race-analysis-snapshot', async (_event, payload = {}) => {
+    try {
+      return await raceAnalysisStore.saveSnapshot(payload.snapshot, payload.storageConfig);
+    } catch (error) {
+      return { error: error.message || 'Failed to save race analysis snapshot.' };
+    }
+  });
+
   // Open URL in system browser (for Stripe Checkout)
   ipcMain.handle('open-external', async (_, url) => {
     if (typeof url !== 'string' || !url.trim()) return { error: 'Invalid checkout URL.' };
@@ -644,6 +678,8 @@ app.whenReady().then(() => {
     const fallbackTitles = {
       dashboard: 'Dashboard',
       timing: 'Timing Tower',
+      laphistory: 'Player Lap History',
+      analysis: 'Race Analysis',
       trackmap: 'Track Map',
       vehicle: 'Vehicle Status',
       session: 'Session',

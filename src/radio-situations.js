@@ -89,6 +89,7 @@ export const RADIO_CATEGORIES = {
       'undercut_attempt', 'overcut_attempt',
       'rejoin_traffic', 'rejoin_clean_air',
       'pit_limiter', 'pit_exit_new_tyres',
+      'outlap_critical',
       'emergency_stop', 'free_stop_sc', 'serving_penalty',
       'late_race_hold_track', 'short_race_hold_track', 'weather_crossover_pit',
     ],

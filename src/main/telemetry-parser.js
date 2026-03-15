@@ -105,6 +105,7 @@ export function parseLapData(msg) {
         deltaToLeaderMs: msg.readUInt16LE(o + 17) + msg.readUInt8(o + 19) * 60000,
         lapDistance: msg.readFloatLE(o + 20),
         totalDistance: msg.readFloatLE(o + 24),
+        safetyCarDelta: msg.readFloatLE(o + 28),
         carPosition: msg.readUInt8(o + 32),
         currentLapNum: msg.readUInt8(o + 33),
         pitStatus: msg.readUInt8(o + 34),

@@ -501,8 +501,14 @@ export function createVehiclePage(deps) {
         'tyre-rr': dmg.tyresWear[1],
       };
       for (const [id, pct] of Object.entries(zoneMap)) {
-        const zoneEl = el(`zone-${id}`);
-        if (zoneEl) zoneEl.setAttribute('fill', dmgColor(pct));
+        const color = dmgColor(pct);
+        const zoneTargets = [
+          ...document.querySelectorAll(`[data-dmg-zone="${id}"]`),
+          ...document.querySelectorAll(`#zone-${id}`),
+        ];
+        zoneTargets.forEach((node) => {
+          node.style.fill = color;
+        });
       }
       const fwEl = el('ov-fw');
       if (fwEl) {

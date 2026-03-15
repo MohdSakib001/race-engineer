@@ -175,6 +175,56 @@ export function createAutoRadioFeature(deps) {
       radio.prev.lastBattleBatteryDeltaBehind = deltaPct;
     }
   }
+  function resetPitOutlapThreat() {
+    radio.prev.pitThreatArmed = false;
+    radio.prev.pitThreatGapBehindMs = 0;
+    radio.prev.pitThreatPitLossMs = 0;
+    radio.prev.pitThreatReferenceLapMs = 0;
+    radio.prev.pitThreatRivalName = '';
+  }
+  function pickPitThreatReferenceLapMs(playerLap, rivalLap) {
+    const playerLastLapMs = Number(playerLap?.lastLapTimeMs) || 0;
+    if (playerLastLapMs > 0 && playerLastLapMs < 300000) return playerLastLapMs;
+    const rivalLastLapMs = Number(rivalLap?.lastLapTimeMs) || 0;
+    if (rivalLastLapMs > 0 && rivalLastLapMs < 300000) return rivalLastLapMs;
+    const bestLapMs = Number(state.bestLapTimes?.[state.playerCarIndex]) || 0;
+    if (bestLapMs > 0 && bestLapMs < 300000) return bestLapMs;
+    return 0;
+  }
+  function buildOutlapCriticalText() {
+    const gapBehindSec = radio.prev.pitThreatGapBehindMs / 1000;
+    const pitLossSec = radio.prev.pitThreatPitLossMs / 1000;
+    const marginMs = radio.prev.pitThreatGapBehindMs - radio.prev.pitThreatPitLossMs;
+    const marginSec = marginMs / 1000;
+    const rivalName = radio.prev.pitThreatRivalName || 'Car behind';
+    const targetLapMs = radio.prev.pitThreatReferenceLapMs > 0
+      ? Math.max(0, radio.prev.pitThreatReferenceLapMs + marginMs)
+      : 0;
+    let text = `Outlap critical. ${rivalName} was ${gapBehindSec.toFixed(1)}s behind at pit entry against ${pitLossSec.toFixed(1)}s pit loss. Net delta ${marginSec >= 0 ? '+' : ''}${marginSec.toFixed(1)}s.`;
+    if (targetLapMs > 0) text += ` Target outlap ${fmt(targetLapMs)}.`;
+    return text;
+  }
+  function armPitOutlapThreat(lap) {
+    if (!isRaceSession(state.session)) {
+      resetPitOutlapThreat();
+      return;
+    }
+    const pitLossMs = (state.analysis?.pitLossEstimateSec ?? 22) * 1000;
+    const carBehindLap = state.lapData?.find((entry) => entry?.carPosition === lap.carPosition + 1);
+    const gapBehindMs = Number(carBehindLap?.deltaToCarAheadMs) || 0;
+    if (!(pitLossMs > 0) || !(gapBehindMs > 0) || Math.abs(gapBehindMs - pitLossMs) > 5000) {
+      resetPitOutlapThreat();
+      return;
+    }
+    const rivalIdx = carBehindLap ? state.lapData.indexOf(carBehindLap) : -1;
+    radio.prev.pitThreatArmed = true;
+    radio.prev.pitThreatGapBehindMs = gapBehindMs;
+    radio.prev.pitThreatPitLossMs = pitLossMs;
+    radio.prev.pitThreatReferenceLapMs = pickPitThreatReferenceLapMs(lap, carBehindLap);
+    radio.prev.pitThreatRivalName = rivalIdx >= 0
+      ? (state.participants?.participants?.[rivalIdx]?.name || `Car ${rivalIdx + 1}`)
+      : 'Car behind';
+  }
   function toInfoOnlyRadioText(text) {
     const raw = (text || '').replace(/\s+/g, ' ').trim();
     if (!raw) return '';
@@ -569,6 +619,7 @@ export function createAutoRadioFeature(deps) {
     if (!radio.config.flags?.enabled && !radio.config.restart?.enabled && !radio.config.pit?.enabled) return;
     const ses = state.session;
     if (!ses) return;
+    const lap = state.lapData?.[state.playerCarIndex];
     const redFlagPeriods = ses.numRedFlagPeriods || 0;
     if (redFlagPeriods > (radio.prev.redFlagPeriods || 0)) {
       emitLocalRadio('flags', 'critical', RADIO_MESSAGES.flag_red().text, 'red_flag');
@@ -598,6 +649,22 @@ export function createAutoRadioFeature(deps) {
       }
     }
     radio.prev.safetyCarStatus = sc;
+    if (sc === 2 && lap && Number.isFinite(lap.safetyCarDelta)) {
+      if (lap.safetyCarDelta <= -4 && !radio.prev.vscDeltaWarned) {
+        radio.prev.vscDeltaWarned = true;
+        emitLocalRadio(
+          'flags',
+          Math.abs(lap.safetyCarDelta) >= 6 ? 'critical' : 'high',
+          `VSC delta ${lap.safetyCarDelta.toFixed(1)}s.`,
+          'vsc_delta',
+          { cooldownKey: 'vsc_delta', skipCooldown: true },
+        );
+      } else if (lap.safetyCarDelta > -2) {
+        radio.prev.vscDeltaWarned = false;
+      }
+    } else {
+      radio.prev.vscDeltaWarned = false;
+    }
     // FIA flags per car
     const sts = state.status;
     if (sts) {
@@ -720,10 +787,22 @@ export function createAutoRadioFeature(deps) {
     const prevInPitLane = radio.prev.pitLaneActive === 1;
     if (prevPS !== undefined && ps !== prevPS) {
       if (ps === 1 && prevPS === 0 && !inPitLane) {
+        armPitOutlapThreat(lap);
         emitLocalRadio('pit', 'medium', 'Pit stop confirmed this lap.', 'planned_stop');
       } else if (ps === 0 && prevPS >= 1) {
-        const cmp = sts ? (TYRE_COMPOUNDS[sts.visualTyreCompound]?.name || '') : '';
-        emitLocalRadio('pit', 'medium', `Good stop. Out on ${cmp || 'new tyres'}.`, 'pit_exit_new_tyres');
+        if (radio.prev.pitThreatArmed) {
+          emitLocalRadio(
+            'pit',
+            'high',
+            buildOutlapCriticalText(),
+            'outlap_critical',
+            { cooldownKey: 'pit_outlap_critical', skipCooldown: true },
+          );
+        } else {
+          const cmp = sts ? (TYRE_COMPOUNDS[sts.visualTyreCompound]?.name || '') : '';
+          emitLocalRadio('pit', 'medium', `Good stop. Out on ${cmp || 'new tyres'}.`, 'pit_exit_new_tyres');
+        }
+        resetPitOutlapThreat();
       }
     }
     if (!prevInPitLane && inPitLane) {

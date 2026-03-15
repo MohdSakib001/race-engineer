@@ -60,6 +60,14 @@ import { builtins } from '@electron-forge/plugin-vite/dist/config/vite.base.conf
 export default defineConfig({
   define: {
     '__ENV__': JSON.stringify(envBundle),
+    'process.env.WS_NO_BUFFER_UTIL': JSON.stringify('1'),
+    'process.env.WS_NO_UTF_8_VALIDATE': JSON.stringify('1'),
+  },
+  resolve: {
+    alias: {
+      bufferutil: path.join(path.dirname(fileURLToPath(import.meta.url)), 'src/main/shims/ws-optional-native-addon.js'),
+      'utf-8-validate': path.join(path.dirname(fileURLToPath(import.meta.url)), 'src/main/shims/ws-optional-native-addon.js'),
+    },
   },
   build: {
     rollupOptions: {

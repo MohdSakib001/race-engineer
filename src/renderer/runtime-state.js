@@ -5,6 +5,38 @@ export function normalizeListenPort(value) {
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : DEFAULT_LISTEN_PORT;
 }
 
+export function createRaceAnalysisState(options = {}) {
+  return {
+    sessionSignature: null,
+    sessionLabel: '',
+    sessionStartedAt: null,
+    lastObservedAt: null,
+    startFuelKg: null,
+    currentFuelKg: null,
+    lastRecordedLapNumber: 0,
+    lastRecordedLapKey: null,
+    lastRecordedPitStops: 0,
+    completedLaps: [],
+    lapTraces: {},
+    currentLapTrace: null,
+    compareLapA: null,
+    compareLapB: null,
+    pitLossEstimateSec: Number.isFinite(options.pitLossEstimateSec) ? options.pitLossEstimateSec : 22,
+    storageConfig: {
+      remoteSyncEnabled: options.storageConfig?.remoteSyncEnabled === true,
+      supabaseUrl: options.storageConfig?.supabaseUrl || '',
+      supabaseKey: options.storageConfig?.supabaseKey || '',
+      supabaseTable: options.storageConfig?.supabaseTable || 'race_analysis_snapshots',
+    },
+    storage: {
+      lastDraftSavedAt: null,
+      lastSnapshotSavedAt: null,
+      lastSaveStatus: '',
+      recentSnapshots: [],
+    },
+  };
+}
+
 export function createAppState() {
   return {
     connected: false,
@@ -22,6 +54,7 @@ export function createAppState() {
     bestLapTimes: {},
     fastestLapCar: -1,
     fastestLapMs: 0,
+    analysis: createRaceAnalysisState(),
   };
 }
 
@@ -143,6 +176,12 @@ export function createRadioState(getDefaultRadioConfig) {
       sessionFinished: false,
       restartAwaitingLeaderThrottle: false,
       rivalOffTrack: {},
+      vscDeltaWarned: false,
+      pitThreatArmed: false,
+      pitThreatGapBehindMs: 0,
+      pitThreatPitLossMs: 0,
+      pitThreatReferenceLapMs: 0,
+      pitThreatRivalName: '',
     },
   };
 }
