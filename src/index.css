@@ -1640,3 +1640,24 @@ body.detached #topbar { padding-left: 16px; }
 .lap-history-table {
   min-width: 960px;
 }
+
+/* ── Apex Engineer launch button ─────────────────────────────────────────── */
+.apex-launch-btn {
+  width: calc(100% - 16px);
+  margin: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: rgba(0, 210, 190, 0.1);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 12px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  transition: all 0.2s;
+}
+.apex-launch-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+}

@@ -1328,7 +1328,8 @@ export function createAutoRadioFeature(deps) {
     thinkingCard.className = 'radio-card thinking';
     thinkingCard.innerHTML = `<span class="radio-tag tag-${scenario}"> ${scenario.toUpperCase()}</span> <span class="radio-thinking">Engineer analysing</span>`;
     if (feedEl) feedEl.prepend(thinkingCard);
-    const result = await window.raceEngineer.askEngineer({
+    const { api: tauriApi } = await import('../../lib/tauri-api');
+    const result = await tauriApi.askEngineer({
       question: prompt, context: ctx, mode: 'ENGINEER_DECISION',
     });
     thinkingCard.remove();

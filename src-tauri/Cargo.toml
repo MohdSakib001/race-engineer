@@ -1,0 +1,34 @@
+[package]
+name = "apex-engineer"
+version = "0.1.0"
+description = "Apex Engineer — F1 25 Race Telemetry"
+authors = ["mohd wazid ali"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "apex_engineer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri             = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs     = "2"
+tauri-plugin-shell  = "2"
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+tokio             = { version = "1", features = ["full"] }
+reqwest           = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+futures-util      = "0.3"
+base64            = "0.22"
+log               = "0.4"
+tauri-plugin-log  = "2"
+
+[profile.release]
+opt-level = 3
+lto        = true
+codegen-units = 1

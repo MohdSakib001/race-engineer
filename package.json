@@ -1,44 +1,36 @@
 {
-  "name": "race-engineer",
-  "productName": "race-engineer",
-  "version": "1.0.0",
-  "description": "My Electron application description",
-  "main": ".vite/build/main.js",
+  "name": "apex-engineer",
+  "productName": "Apex Engineer",
+  "version": "0.1.0",
+  "description": "F1 25 Race Telemetry & AI Engineer — Tauri + React",
   "private": true,
   "scripts": {
-    "start": "electron-forge start",
-    "package": "electron-forge package",
-    "make": "electron-forge make",
-    "publish": "electron-forge publish",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "dev:vite": "vite",
+    "build:vite": "tsc && vite build",
+    "tauri": "tauri",
     "lint": "echo \"No linting configured\""
   },
-  "keywords": [],
   "author": {
-    "name": "Mohd Sakib",
-    "email": "saifishakib960@gmail.com"
+    "name": "mohd wazid ali",
+    "email": "aliwazid551@gmail.com"
   },
   "license": "MIT",
   "devDependencies": {
-    "@electron-forge/cli": "^7.11.1",
-    "@electron-forge/maker-deb": "^7.11.1",
-    "@electron-forge/maker-rpm": "^7.11.1",
-    "@electron-forge/maker-squirrel": "^7.11.1",
-    "@electron-forge/maker-zip": "^7.11.1",
-    "@electron-forge/plugin-auto-unpack-natives": "^7.11.1",
-    "@electron-forge/plugin-fuses": "^7.11.1",
-    "@electron-forge/plugin-vite": "^7.11.1",
-    "@electron/fuses": "^1.8.0",
-    "dotenv": "^17.3.1",
-    "electron": "40.8.0",
+    "@tauri-apps/cli": "^2.10.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.9.3",
     "vite": "^5.4.21"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.78.0",
-    "edge-tts-universal": "^1.4.0",
-    "electron-squirrel-startup": "^1.0.1",
-    "ws": "^8.19.0"
-  },
-  "overrides": {
-    "esbuild": ">=0.25.0"
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-dialog": "^2.7.0",
+    "@tauri-apps/plugin-fs": "^2.5.0",
+    "@tauri-apps/plugin-shell": "^2.3.5",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
   }
 }
