@@ -42,7 +42,10 @@
       "Bash(cmd.exe /c \"start /wait /b powershell.exe -NoProfile -Command \\\\\"[Environment]::GetEnvironmentVariable\\('Path','User'\\) -split ';' | Select-String cargo\\\\\"\")",
       "Bash(npm run *)",
       "Bash(taskkill //F //IM apex-engineer.exe)",
-      "Bash(taskkill //F //IM cargo.exe)"
+      "Bash(taskkill //F //IM cargo.exe)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(echo \"---exit=$?\")"
     ]
   }
 }

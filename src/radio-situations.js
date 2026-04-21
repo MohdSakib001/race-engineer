@@ -371,8 +371,20 @@ export const RADIO_MESSAGES = {
 
   // ── Tyres ──
   tyre_cliff: (ctx) => ({
-    text: `Tyre cliff! ${ctx.tyre} at ${ctx.wear}% and lap time dropping fast. Box this lap if possible.`,
+    text: `Cliff incoming. ${ctx.tyre || 'Rears'} at ${ctx.wear}%, pace down ${ctx.paceLoss ? ctx.paceLoss.toFixed(1) + 's' : 'markedly'}. Box this lap.`,
     urgency: 'critical',
+  }),
+  tyre_wear_critical: (ctx) => ({
+    text: `Tyres critical — ${ctx.tyre || 'max'} at ${ctx.wear}%. Pit window open. Box, box, box.`,
+    urgency: 'critical',
+  }),
+  tyre_puncture_suspected: (ctx) => ({
+    text: `Sudden wear spike on ${ctx.tyre}. Possible puncture. Check vibration, stay off kerbs, box now if you feel it.`,
+    urgency: 'critical',
+  }),
+  tyre_temp_window_lost: (ctx) => ({
+    text: `Tyres out of the window — ${ctx.temp}°C. Aggressive weave on the next straight, one hard push lap to build temp.`,
+    urgency: 'medium',
   }),
   tyre_extend_stint: (ctx) => ({
     text: `Extending stint. Tyres at ${ctx.wear}% but pace is still there. ${ctx.lapsToGo} laps to target.`,
@@ -397,23 +409,47 @@ export const RADIO_MESSAGES = {
 
   // ── Pit ──
   pit_undercut_threat: (ctx) => ({
-    text: `${ctx.rivalName} has pitted. Undercut threat! We may need to respond ${ctx.urgentLaps ? 'in ' + ctx.urgentLaps + ' laps' : 'soon'}.`,
+    text: `${ctx.rivalName} has boxed. Undercut exposure roughly ${ctx.gainSec ? ctx.gainSec.toFixed(1) + 's' : '1.5s'} per lap. Respond ${ctx.urgentLaps ? 'within ' + ctx.urgentLaps + ' laps' : 'next lap'}.`,
     urgency: 'high',
   }),
-  pit_overcut_opportunity: () => ({
-    text: 'Rivals pitting. Stay out and use clean air. Overcut opportunity.',
+  pit_undercut_window_open: (ctx) => ({
+    text: `Undercut window open on ${ctx.rivalName}. Gap ${ctx.gapSec.toFixed(1)}s, pit loss ${ctx.pitLossSec}s. Push this lap, box next.`,
+    urgency: 'high',
+  }),
+  pit_overcut_opportunity: (ctx) => ({
+    text: `${ctx.rivalName} has pitted. Your tyres still in range — overcut on. Push three laps, then respond.`,
     urgency: 'medium',
   }),
+  pit_window_open: (ctx) => ({
+    text: `Pit window open. Ideal lap ${ctx.idealLap}, latest ${ctx.latestLap}. Plan your stop.`,
+    urgency: 'medium',
+  }),
+  pit_window_closing: (ctx) => ({
+    text: `Pit window closing — ${ctx.lapsLeft} laps to latest. Decide now.`,
+    urgency: 'high',
+  }),
   pit_free_stop_sc: () => ({
-    text: 'Safety car! Free pit stop. Box box box!',
+    text: 'Safety car! Free stop. Box, box, box.',
     urgency: 'critical',
   }),
-  pit_rejoin_traffic: () => ({
-    text: 'Out of the pits in traffic. Manage the tyres for two laps before pushing.',
+  pit_free_stop_vsc: (ctx) => ({
+    text: `VSC deployed. Pit loss roughly halved, about ${ctx.pitLossSec}s. Box this lap if the window allows.`,
+    urgency: 'critical',
+  }),
+  pit_rejoin_traffic: (ctx) => ({
+    text: `Out into P${ctx.position}, ${ctx.aheadName ? ctx.aheadName + ' ahead ' + ctx.gapSec.toFixed(1) + 's' : 'traffic'}. Two laps to build temp, then push.`,
     urgency: 'low',
   }),
-  pit_rejoin_clean: () => ({
-    text: 'Clean air out of the pits. Push hard and build the gap.',
+  pit_rejoin_clean: (ctx) => ({
+    text: `Clean air. P${ctx.position}. Build the gap — target ${ctx.targetLapSec ? ctx.targetLapSec.toFixed(1) + 's laps' : 'maximum pace'}.`,
+    urgency: 'medium',
+  }),
+  pit_emergency_damage: (ctx) => ({
+    text: `Box now. ${ctx.damageDesc}. Can't continue without a stop.`,
+    urgency: 'critical',
+  }),
+  pit_exit_cold_tyres: (ctx) => ({
+    text: `New ${ctx.compound} out. ${ctx.temp}°C — cold. Ease the first corner and build into it.`,
     urgency: 'medium',
   }),
 
@@ -435,22 +471,60 @@ export const RADIO_MESSAGES = {
     urgency: 'high',
   }),
 
+  // ── Fuel ──
+  fuel_critical: (ctx) => ({
+    text: `Fuel critical — ${ctx.fuelLaps.toFixed(1)} laps of fuel for ${ctx.remainingLaps} remaining. Lift and coast, short-shift.`,
+    urgency: 'critical',
+  }),
+  fuel_saving_needed: (ctx) => ({
+    text: `Target minus ${ctx.deficitPct.toFixed(0)}%. Lift-and-coast the heavy-braking zones, save ${ctx.savePerLap.toFixed(2)} kg per lap.`,
+    urgency: 'high',
+  }),
+  fuel_recovered: () => ({
+    text: 'Fuel back on target. Permission to push.',
+    urgency: 'low',
+  }),
+  fuel_push_remaining: (ctx) => ({
+    text: `Fuel plus ${ctx.surplusPct.toFixed(0)}%. You've got the energy — push it.`,
+    urgency: 'medium',
+  }),
+
   // ── Flags ──
   flag_yellow: () => ({
     text: 'Yellow flag. No overtaking.',
     urgency: 'critical',
   }),
+  flag_yellow_sector: (ctx) => ({
+    text: `Yellow sector ${ctx.sector}. Lift through, no moves.`,
+    urgency: 'critical',
+  }),
+  flag_double_yellow: () => ({
+    text: 'Double waved yellow! Be prepared to stop. Marshalls on track.',
+    urgency: 'critical',
+  }),
+  flag_blue: (ctx) => ({
+    text: `Blue flags — leader${ctx.laps ? ' ' + ctx.laps + ' lap' + (ctx.laps > 1 ? 's' : '') + ' up' : ''}. Let them through cleanly.`,
+    urgency: 'high',
+  }),
   flag_rejoining_track: (ctx) => ({
     text: `${ctx.rivalName} rejoining track, ${ctx.distanceMeters} metres.`,
     urgency: 'high',
   }),
-  flag_sc: () => ({
-    text: 'Safety car deployed! Close up to the pack. Consider pit strategy.',
+  flag_sc: (ctx) => ({
+    text: `Safety car deployed. Close up to the pack${ctx.pitWindowOpen ? ' — free-stop opportunity.' : '.'}`,
     urgency: 'critical',
   }),
-  flag_vsc: () => ({
-    text: 'Virtual safety car. Maintain delta. Good time to pit if the window is right.',
+  flag_sc_restart: () => ({
+    text: 'Safety car in this lap. Build heat into tyres and brakes. Restart next lap.',
+    urgency: 'high',
+  }),
+  flag_vsc: (ctx) => ({
+    text: `Virtual safety car. Hold the delta${ctx.pitWindowOpen ? ' — half pit loss available.' : '.'}`,
     urgency: 'critical',
+  }),
+  flag_vsc_ending: () => ({
+    text: 'VSC ending in this sector. Go on green.',
+    urgency: 'high',
   }),
   flag_red: () => ({
     text: 'Red flag! Race stopped. Return to the pits. Free tyre change opportunity.',
@@ -477,16 +551,20 @@ export const RADIO_MESSAGES = {
 
   // ── Incidents & Damage ──
   incident_wing_damage: (ctx) => ({
-    text: `Front wing damage — ${ctx.side} at ${ctx.pct}%. Balance will shift. Adjust your driving.`,
-    urgency: 'high',
+    text: `Front wing ${ctx.side} at ${ctx.pct}%. Understeer in slow corners. ${ctx.pct >= 40 ? 'Box end of this lap for a new nose.' : 'Adjust, continue.'}`,
+    urgency: ctx.pct >= 40 ? 'critical' : 'high',
   }),
   incident_floor_damage: (ctx) => ({
-    text: `Floor damage at ${ctx.pct}%. Downforce reduced. You'll feel it in high-speed corners.`,
-    urgency: 'high',
+    text: `Floor at ${ctx.pct}% damage. High-speed downforce down. ${ctx.pct >= 50 ? 'Consider pitting.' : 'Compensate with more front wing next stop.'}`,
+    urgency: ctx.pct >= 50 ? 'critical' : 'high',
   }),
   incident_engine_damage: (ctx) => ({
-    text: `Engine wear high — ${ctx.pct}%. Watch the temperatures. Don't push the limiter.`,
-    urgency: 'high',
+    text: `Engine damage ${ctx.pct}%. Short-shift, stay out of the limiter. ${ctx.pct >= 30 ? 'Reliability risk.' : ''}`.trim(),
+    urgency: ctx.pct >= 30 ? 'critical' : 'high',
+  }),
+  incident_gearbox_damage: (ctx) => ({
+    text: `Gearbox wear ${ctx.pct}%. Clean shifts, no blips. ${ctx.pct >= 25 ? 'Grid penalty risk.' : ''}`.trim(),
+    urgency: ctx.pct >= 25 ? 'critical' : 'high',
   }),
   incident_drs_fault: () => ({
     text: 'DRS fault. System unavailable this race. Compensate with ERS on the straights.',
@@ -531,6 +609,62 @@ export const RADIO_MESSAGES = {
   racecraft_fresher_tyres: (ctx) => ({
     text: `You're on ${ctx.tyreDeltaLaps}-lap fresher rubber than ${ctx.rivalName}. Use the rotation advantage and pressure on exit.`,
     urgency: 'low',
+  }),
+
+  // ── Weather (extended) ──
+  weather_forecast_rain: (ctx) => ({
+    text: `Rain expected in ${ctx.minutes} minutes, ${ctx.rainPct}% intensity. Plan the crossover now.`,
+    urgency: 'high',
+  }),
+  weather_pit_for_inters: (ctx) => ({
+    text: `Inters crossover point — slick pace losing ${ctx.lossSec.toFixed(1)}s per lap. Box for inters.`,
+    urgency: 'critical',
+  }),
+  weather_pit_for_wets: () => ({
+    text: 'Rain heavy. Inters overwhelmed. Box for wets.',
+    urgency: 'critical',
+  }),
+  weather_pit_for_slicks: (ctx) => ({
+    text: `Track drying. Slicks ${ctx.gainSec.toFixed(1)}s faster on the drying line. Box for slicks.`,
+    urgency: 'high',
+  }),
+
+  // ── Rivals (extended) ──
+  rival_dnf: (ctx) => ({
+    text: `${ctx.rivalName} is out. Position up — you're P${ctx.position}.`,
+    urgency: 'medium',
+  }),
+  rival_penalty_gift: (ctx) => ({
+    text: `${ctx.rivalName} has a ${ctx.seconds}-second penalty. Stay within ${ctx.seconds}s of them at the flag — position is yours.`,
+    urgency: 'medium',
+  }),
+  rival_pitted_reaction: (ctx) => ({
+    text: `${ctx.rivalName} has pitted. ${ctx.threat ? 'Undercut threat — push for two laps.' : 'Overcut on — hold pace, we react next stop.'}`,
+    urgency: ctx.threat ? 'high' : 'medium',
+  }),
+
+  // ── Battle awareness (extended) ──
+  battle_dirty_air_prolonged: (ctx) => ({
+    text: `${ctx.laps} laps in ${ctx.aheadName}'s wake. Fronts cooking. Commit to the move or drop back two seconds to cool.`,
+    urgency: 'high',
+  }),
+  battle_slipstream_gained: (ctx) => ({
+    text: `DRS and tow. ${(ctx.gapMs / 1000).toFixed(2)}s to ${ctx.aheadName}. Full battery on the straight, this is the chance.`,
+    urgency: 'high',
+  }),
+
+  // ── Sector performance ──
+  sector_loss: (ctx) => ({
+    text: `Sector ${ctx.sector} down ${ctx.lossMs}ms. ${ctx.hint || 'Check the reference line through there.'}`,
+    urgency: 'medium',
+  }),
+  sector_gain: (ctx) => ({
+    text: `Sector ${ctx.sector} purple! ${ctx.lossMs ? `Up ${Math.abs(ctx.lossMs)}ms` : 'Fastest of anyone'}.`,
+    urgency: 'low',
+  }),
+  fastest_lap_threshold: (ctx) => ({
+    text: `Fastest lap in reach — target ${ctx.targetSec.toFixed(3)}. You've got fresh rubber, go for it.`,
+    urgency: 'medium',
   }),
 
   // ── End Race ──

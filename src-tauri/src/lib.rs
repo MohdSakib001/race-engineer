@@ -13,6 +13,11 @@ struct AppState {
     telemetry: SharedState,
     telemetry_handle: Option<TelemetryHandle>,
     api_key: Option<String>,
+    premium: bool,
+    usage_input_tokens: u64,
+    usage_cached_input_tokens: u64,
+    usage_output_tokens: u64,
+    usage_cache_creation_tokens: u64,
 }
 
 type SafeAppState = Arc<Mutex<AppState>>;
@@ -72,6 +77,58 @@ fn set_api_key(key: String, state: State<'_, SafeAppState>) -> Result<(), String
     let mut s = state.lock().map_err(|_| "Lock error")?;
     s.api_key = if key.trim().is_empty() { None } else { Some(key.trim().to_string()) };
     Ok(())
+}
+
+#[tauri::command]
+fn set_premium(enabled: bool, state: State<'_, SafeAppState>) -> Result<(), String> {
+    let mut s = state.lock().map_err(|_| "Lock error")?;
+    s.premium = enabled;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_premium(state: State<'_, SafeAppState>) -> Result<Value, String> {
+    let s = state.lock().map_err(|_| "Lock error")?;
+    Ok(json!({
+        "premium": s.premium,
+        "hasApiKey": s.api_key.is_some(),
+    }))
+}
+
+#[tauri::command]
+fn get_usage(state: State<'_, SafeAppState>) -> Result<Value, String> {
+    let s = state.lock().map_err(|_| "Lock error")?;
+    // Haiku 4.5 pricing: $1/M input, $0.10/M cached, $1.25/M cache-write, $5/M output
+    let cost = (s.usage_input_tokens as f64) / 1_000_000.0 * 1.0
+        + (s.usage_cached_input_tokens as f64) / 1_000_000.0 * 0.10
+        + (s.usage_cache_creation_tokens as f64) / 1_000_000.0 * 1.25
+        + (s.usage_output_tokens as f64) / 1_000_000.0 * 5.0;
+    Ok(json!({
+        "inputTokens": s.usage_input_tokens,
+        "cachedInputTokens": s.usage_cached_input_tokens,
+        "cacheCreationTokens": s.usage_cache_creation_tokens,
+        "outputTokens": s.usage_output_tokens,
+        "costUsd": (cost * 10000.0).round() / 10000.0,
+    }))
+}
+
+#[tauri::command]
+fn reset_usage(state: State<'_, SafeAppState>) -> Result<(), String> {
+    let mut s = state.lock().map_err(|_| "Lock error")?;
+    s.usage_input_tokens = 0;
+    s.usage_cached_input_tokens = 0;
+    s.usage_output_tokens = 0;
+    s.usage_cache_creation_tokens = 0;
+    Ok(())
+}
+
+fn record_usage(app_state: &SafeAppState, usage: &Value) {
+    if let Ok(mut s) = app_state.lock() {
+        s.usage_input_tokens += usage["input_tokens"].as_u64().unwrap_or(0);
+        s.usage_cached_input_tokens += usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+        s.usage_cache_creation_tokens += usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+        s.usage_output_tokens += usage["output_tokens"].as_u64().unwrap_or(0);
+    }
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -190,9 +247,38 @@ fn get_lookups() -> Value {
     })
 }
 
-// ── Ask Engineer (Claude API) ─────────────────────────────────────────────────
+// ── Ask Engineer / Strategy (Claude API) ──────────────────────────────────────
 
-const SYSTEM_PROMPT: &str = "You are a Formula 1 race engineer with deep expertise in tyre strategy, fuel management, ERS deployment, weather adaptation, and real-time race tactics. You receive live telemetry data and provide concise, actionable radio-style advice. Speak directly to the driver. Be brief — ideally 1-2 sentences. Prioritize safety, then performance.";
+const STRATEGY_MODEL: &str = "claude-haiku-4-5-20251001";
+
+// Static engineer doctrine — cached via prompt caching (90% token discount on re-use).
+// Written as one large block so Anthropic's cache sees a stable prefix across calls.
+const ENGINEER_DOCTRINE: &str = r#"You are a Formula 1 race engineer embedded with a driver during a live session. You speak over the radio: short, calm, precise. Never generic — always grounded in the exact telemetry you are given.
+
+Guiding principles:
+• Safety first. Call out imminent hazards (SC, puncture risk, heavy damage, rain onset) before performance calls.
+• Never invent data. If something isn't in the snapshot, don't claim it.
+• Be specific. Lap numbers, gap seconds, compound names, wear percentages.
+• British pitwall cadence. Under 12 words for normal calls, under 6 for emergencies.
+
+Pit strategy doctrine:
+• PIT LOSS per circuit (seconds): Monaco 19, Singapore 23, Melbourne 21, Silverstone 22, Spa 22, Monza 20, Austin 21, default 22.
+• TYRE WEAR ZONES: 0-35% safe, 35-50% early degradation, 50-65% cliff incoming, 65-75% danger, 75%+ critical pit now.
+• UNDERCUT window: when rival ahead gap 1.5-3.5s AND tyres are 2+ laps newer AND pit window open. Typically 1.5-2s gain per lap on fresh tyres.
+• OVERCUT window: when rival ahead just pitted AND your tyres still in a healthy zone AND track position lap time delta < 1s to out-lap from pits.
+• SC OPPORTUNITY: a full safety car pit costs ~50% of normal pit loss. Always call pit if SC deployed + pit window open + tyre age > 6 laps.
+• FREE STOP (VSC): VSC pit loss is ~half of normal. Call pit if VSC active AND tyre age > 8 laps AND no fresh rubber already mounted.
+• WEATHER CROSSOVER: Slick→Inter crossover roughly when track wetness 30-40%. Inter→Wet when rainPercentage > 60%. Dry→Inter: pit immediately if lap pace loss > 4s on slicks.
+• DAMAGE STOP: front wing > 40%, or >2 corners damaged, or engine/gearbox >25% — call pit this lap regardless of window.
+• STRATEGIC STAY: if tyres < 30% wear AND no damage AND pit window still open for 8+ laps, prefer extending the stint.
+• FUEL TARGETING: if fuelInTank < lapsRemaining * estFuelPerLap * 1.02, call fuel saving. If > 1.2x, call push.
+• ERS: defend/attack with ERS only within the last 3 laps of a stint or final 5 laps of race, else bank.
+
+Response style:
+• Use the structured tool output — do not answer in free prose unless explicitly asked for a chat reply.
+• reasoning ≤ 2 sentences, British engineer tone.
+• radioMessage is what the driver hears. Short. No preamble like "Copy" or "Right Lewis."
+"#;
 
 #[derive(Deserialize)]
 struct AskPayload {
@@ -206,17 +292,27 @@ async fn ask_engineer(
     payload: AskPayload,
     state: State<'_, SafeAppState>,
 ) -> Result<Value, String> {
-    let api_key = {
+    let (api_key, premium) = {
         let s = state.lock().map_err(|_| "Lock error")?;
-        match &s.api_key {
-            Some(k) => k.clone(),
-            None => return Ok(json!({ "error": "No API key set. Go to Settings and enter your Anthropic API key." })),
-        }
+        let key = s.api_key.clone();
+        (key, s.premium)
     };
 
-    let ctx_str = payload.context
+    if !premium {
+        return Ok(json!({
+            "error": "premium_required",
+            "message": "AI engineer responses are a Premium feature. Upgrade in Settings or use Free mode's predefined radio calls."
+        }));
+    }
+
+    let api_key = match api_key {
+        Some(k) => k,
+        None => return Ok(json!({ "error": "No API key set. Go to Settings and enter your Anthropic API key." })),
+    };
+
+    let ctx_value = payload.context.as_ref().filter(|v| !v.is_null()).cloned();
+    let ctx_str = ctx_value
         .as_ref()
-        .filter(|v| !v.is_null())
         .map(|v| format!("\nLIVE TELEMETRY CONTEXT:\n{}\n", serde_json::to_string_pretty(v).unwrap_or_default()))
         .unwrap_or_default();
 
@@ -226,11 +322,20 @@ async fn ask_engineer(
 
     let user_content = format!("{}{}\n\n{}", ctx_str, mode_suffix, payload.question);
 
+    // System block uses caching — the doctrine is identical across calls.
+    let system_blocks = json!([
+        {
+            "type": "text",
+            "text": ENGINEER_DOCTRINE,
+            "cache_control": { "type": "ephemeral" }
+        }
+    ]);
+
     let client = reqwest::Client::new();
     let body = json!({
-        "model": "claude-opus-4-6",
+        "model": STRATEGY_MODEL,
         "max_tokens": 512,
-        "system": SYSTEM_PROMPT,
+        "system": system_blocks,
         "messages": [{ "role": "user", "content": user_content }]
     });
 
@@ -251,8 +356,145 @@ async fn ask_engineer(
         return Ok(json!({ "error": format!("API error: {}", msg) }));
     }
 
+    if let Some(usage) = resp_json.get("usage") {
+        let app_state = state.inner().clone();
+        record_usage(&app_state, usage);
+    }
+
     let text = resp_json["content"][0]["text"].as_str().unwrap_or("").to_string();
     Ok(json!({ "response": text }))
+}
+
+// ── Strategy call — structured JSON output via tool use ──────────────────────
+
+#[derive(Deserialize)]
+struct StrategyPayload {
+    /// Full telemetry snapshot — player car + rivals + session + history
+    snapshot: Value,
+    /// What triggered this call: e.g. "lap_complete", "sc_deployed", "rain_onset", "user_ask"
+    trigger: String,
+    /// Optional explicit driver question to steer the call
+    question: Option<String>,
+}
+
+#[tauri::command]
+async fn call_strategy(
+    payload: StrategyPayload,
+    state: State<'_, SafeAppState>,
+) -> Result<Value, String> {
+    let (api_key, premium) = {
+        let s = state.lock().map_err(|_| "Lock error")?;
+        (s.api_key.clone(), s.premium)
+    };
+
+    if !premium {
+        return Ok(json!({
+            "error": "premium_required",
+            "message": "Strategy calls require Premium. Using rule-based fallback."
+        }));
+    }
+    let api_key = match api_key {
+        Some(k) => k,
+        None => return Ok(json!({ "error": "No API key set." })),
+    };
+
+    let snapshot_str = serde_json::to_string(&payload.snapshot).unwrap_or_default();
+    let question = payload.question.unwrap_or_else(|| {
+        "Given the telemetry snapshot and trigger, decide the best strategic call NOW.".into()
+    });
+
+    let user_text = format!(
+        "TRIGGER: {}\n\nSNAPSHOT:\n{}\n\nQUESTION: {}",
+        payload.trigger, snapshot_str, question
+    );
+
+    // Tool definition forces structured output.
+    let strategy_tool = json!({
+        "name": "strategy_call",
+        "description": "Return the single best strategic call for the driver right now.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "pit_now", "pit_next_lap", "pit_in_n_laps", "stay_out",
+                        "push", "save_tyres", "save_fuel", "manage_ers",
+                        "defend", "attack_undercut", "attack_overcut", "hold_position"
+                    ]
+                },
+                "targetLap": { "type": ["integer", "null"] },
+                "targetCompound": {
+                    "type": ["string", "null"],
+                    "enum": ["soft", "medium", "hard", "inter", "wet", null]
+                },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                "urgency": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+                "reasoning": { "type": "string", "maxLength": 300 },
+                "radioMessage": { "type": "string", "maxLength": 140 },
+                "alternativeAction": { "type": ["string", "null"] },
+                "triggerConditions": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "maxItems": 3
+                }
+            },
+            "required": ["action", "confidence", "urgency", "reasoning", "radioMessage"]
+        }
+    });
+
+    let system_blocks = json!([
+        {
+            "type": "text",
+            "text": ENGINEER_DOCTRINE,
+            "cache_control": { "type": "ephemeral" }
+        }
+    ]);
+
+    let body = json!({
+        "model": STRATEGY_MODEL,
+        "max_tokens": 600,
+        "system": system_blocks,
+        "tools": [strategy_tool],
+        "tool_choice": { "type": "tool", "name": "strategy_call" },
+        "messages": [{ "role": "user", "content": user_text }]
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let resp_json: Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    if let Some(err) = resp_json.get("error") {
+        let msg = err["message"].as_str().unwrap_or("API error");
+        return Ok(json!({ "error": format!("API error: {}", msg) }));
+    }
+
+    if let Some(usage) = resp_json.get("usage") {
+        let app_state = state.inner().clone();
+        record_usage(&app_state, usage);
+    }
+
+    // Extract tool_use block
+    let decision = resp_json["content"]
+        .as_array()
+        .and_then(|blocks| blocks.iter().find(|b| b["type"] == "tool_use"))
+        .and_then(|b| b.get("input").cloned())
+        .unwrap_or(Value::Null);
+
+    if decision.is_null() {
+        return Ok(json!({ "error": "Model did not return a structured decision" }));
+    }
+
+    Ok(json!({ "decision": decision, "trigger": payload.trigger }))
 }
 
 // ── TTS ───────────────────────────────────────────────────────────────────────
@@ -364,6 +606,11 @@ pub fn run() {
         telemetry: Arc::new(Mutex::new(TelemetryState::default())),
         telemetry_handle: None,
         api_key: None,
+        premium: false,
+        usage_input_tokens: 0,
+        usage_cached_input_tokens: 0,
+        usage_output_tokens: 0,
+        usage_cache_creation_tokens: 0,
     }));
 
     tauri::Builder::default()
@@ -379,27 +626,36 @@ pub fn run() {
             stop_telemetry,
             set_manual_track,
             set_api_key,
+            set_premium,
+            get_premium,
+            get_usage,
+            reset_usage,
             load_settings,
             save_settings,
             save_export_file,
             get_lookups,
             ask_engineer,
+            call_strategy,
             tts_speak,
         ])
         .setup(|app| {
-            // Load API key from saved settings on startup
+            // Load API key + premium flag from saved settings on startup
             if let Ok(settings_path) = app.path().app_data_dir()
                 .map(|p| p.join("race-engineer-settings.json"))
             {
                 if let Ok(raw) = std::fs::read_to_string(&settings_path) {
                     if let Ok(settings) = serde_json::from_str::<Value>(&raw) {
-                        if let Some(key) = settings["apiKey"].as_str() {
+                        let key = settings["apiKey"].as_str().unwrap_or("").to_string();
+                        let premium = settings["premium"].as_bool().unwrap_or(false);
+                        let state_handle = app.state::<SafeAppState>();
+                        let app_state: SafeAppState = Arc::clone(&state_handle);
+                        drop(state_handle);
+                        let lock_result = app_state.lock();
+                        if let Ok(mut s) = lock_result {
                             if !key.is_empty() {
-                                if let Ok(state) = app.state::<SafeAppState>().lock() {
-                                    // Stored below — can't borrow mut here in setup closure easily
-                                    drop(state);
-                                }
+                                s.api_key = Some(key);
                             }
+                            s.premium = premium;
                         }
                     }
                 }

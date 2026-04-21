@@ -1,15 +1,19 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useTelemetryContext } from '../context/TelemetryContext';
+import { usePushToTalk } from '../hooks/usePushToTalk';
+import { clearCache, getStats as getCacheStats } from '../lib/phrase-cache';
 
 import { api } from '../lib/tauri-api';
 
 const TTS_VOICES = [
+  { id: 'en-GB-RyanNeural', label: 'Ryan (British Male) — Engineer-like' },
+  { id: 'en-GB-ThomasNeural', label: 'Thomas (British Male)' },
+  { id: 'en-GB-SoniaNeural', label: 'Sonia (British Female)' },
   { id: 'en-US-GuyNeural', label: 'Guy (US Male)' },
   { id: 'en-US-AriaNeural', label: 'Aria (US Female)' },
-  { id: 'en-GB-RyanNeural', label: 'Ryan (UK Male)' },
-  { id: 'en-GB-SoniaNeural', label: 'Sonia (UK Female)' },
   { id: 'en-AU-WilliamNeural', label: 'William (AU Male)' },
   { id: 'en-AU-NatashaNeural', label: 'Natasha (AU Female)' },
+  { id: 'en-IE-ConnorNeural', label: 'Connor (Irish Male)' },
 ];
 
 const TRACK_NAMES: Record<number, string> = {
@@ -29,50 +33,79 @@ export function Settings() {
 
   const [port, setPort] = useState(20777);
   const [apiKey, setApiKey] = useState('');
+  const [premium, setPremium] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(false);
-  const [ttsVoice, setTtsVoice] = useState('en-US-GuyNeural');
+  const [ttsVoice, setTtsVoice] = useState('en-GB-RyanNeural');
   const [ttsRate, setTtsRate] = useState(1.0);
   const [manualTrackId, setManualTrackId] = useState(-1);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  const [usage, setUsage] = useState<any>(null);
+  const [cacheStats, setCacheStats] = useState<{ entries: number; totalHits: number } | null>(null);
+
+  const ptt = usePushToTalk({ onQuery: () => { /* Settings doesn't dispatch; learning only */ } });
 
   // Load saved settings on mount
   useEffect(() => {
-    if (!api?.loadSettings) return;
-    api.loadSettings().then((settings: any) => {
+    api.loadSettings?.().then((settings: any) => {
       if (!settings) return;
       if (settings.apiKey) setApiKey(settings.apiKey);
+      if (typeof settings.premium === 'boolean') setPremium(settings.premium);
       if (settings.tts?.enabled != null) setTtsEnabled(settings.tts.enabled);
       if (settings.tts?.voice) setTtsVoice(settings.tts.voice);
       if (settings.tts?.rate != null) setTtsRate(settings.tts.rate);
       if (settings.telemetryPort) setPort(settings.telemetryPort);
     }).catch(() => {});
+    api.getUsage?.().then(setUsage).catch(() => {});
+    getCacheStats().then(setCacheStats).catch(() => {});
   }, []);
 
   const applyApiKey = useCallback(() => {
-    if (apiKey.trim()) {
-      api?.setApiKey(apiKey.trim());
-    }
+    if (apiKey.trim()) api.setApiKey(apiKey.trim());
   }, [apiKey]);
 
   const testVoice = useCallback(() => {
-    api?.ttsSpeak({ text: 'Box this lap, box this lap. Tyres are ready.' });
-  }, []);
+    api.ttsSpeak({ text: 'Box this lap, box this lap. Tyres are ready.', voice: ttsVoice });
+  }, [ttsVoice]);
 
   const handleTrackChange = useCallback((trackId: number) => {
     setManualTrackId(trackId);
-    api?.setManualTrack(trackId);
+    api.setManualTrack(trackId);
   }, []);
 
-  const saveAll = useCallback(() => {
-    if (apiKey.trim()) api?.setApiKey(apiKey.trim());
-    api?.saveSettings({
+  const togglePremium = useCallback(async (enabled: boolean) => {
+    setPremium(enabled);
+    try { await api.setPremium(enabled); } catch { /* ignore */ }
+  }, []);
+
+  const saveAll = useCallback(async () => {
+    if (apiKey.trim()) await api.setApiKey(apiKey.trim());
+    await api.setPremium(premium);
+    const prev: any = (await api.loadSettings?.()) ?? {};
+    await api.saveSettings?.({
+      ...prev,
       apiKey: apiKey.trim() || undefined,
+      premium,
       tts: { enabled: ttsEnabled, voice: ttsVoice, rate: ttsRate },
       telemetryPort: port,
+      ptt: { ...(prev.ptt ?? {}), binding: ptt.binding },
     });
     setSaveStatus('Saved!');
     setTimeout(() => setSaveStatus(null), 2000);
-  }, [apiKey, ttsEnabled, ttsVoice, ttsRate, port]);
+  }, [apiKey, premium, ttsEnabled, ttsVoice, ttsRate, port, ptt.binding]);
+
+  const refreshUsage = useCallback(() => {
+    api.getUsage?.().then(setUsage).catch(() => {});
+  }, []);
+
+  const resetUsage = useCallback(() => {
+    api.resetUsage?.().then(refreshUsage).catch(() => {});
+  }, [refreshUsage]);
+
+  const clearAudioCache = useCallback(async () => {
+    await clearCache();
+    const s = await getCacheStats();
+    setCacheStats(s);
+  }, []);
 
   const sortedTracks = Object.entries(TRACK_NAMES).sort((a, b) => a[1].localeCompare(b[1]));
 
@@ -137,6 +170,12 @@ export function Settings() {
                 value={ttsRate} onChange={e => setTtsRate(parseFloat(e.target.value))} />
             </div>
             <button className="btn-action" onClick={testVoice}>Test Voice</button>
+            {cacheStats && (
+              <p className="settings-note" style={{ marginTop: 8 }}>
+                Phrase cache: {cacheStats.entries} entries, {cacheStats.totalHits} hits.{' '}
+                <button className="btn-link" onClick={clearAudioCache}>Clear</button>
+              </p>
+            )}
           </div>
 
           {/* Track Override */}
@@ -160,11 +199,52 @@ export function Settings() {
 
         {/* Right Column */}
         <div className="settings-col">
+          {/* Premium */}
+          <div className="panel">
+            <h3 className="panel-title">SUBSCRIPTION</h3>
+            <div className="settings-field">
+              <label className="toggle-label">
+                <input type="checkbox" checked={premium}
+                  onChange={e => togglePremium(e.target.checked)} />
+                Premium (AI Strategy Calls via Claude Haiku 4.5)
+              </label>
+            </div>
+            <p className="settings-note">
+              Free mode uses the offline rule engine only — no API cost. Premium unlocks
+              dynamic strategy calls (pit windows, undercuts, weather). Typical full race
+              weekend costs under $0.20 in API credits with prompt caching.
+            </p>
+            {usage && (
+              <div className="stat-list" style={{ marginTop: 10 }}>
+                <div className="stat-row-item">
+                  <span className="stat-label-text">Session cost</span>
+                  <span className="stat-value-text">${(usage.costUsd ?? 0).toFixed(4)}</span>
+                </div>
+                <div className="stat-row-item">
+                  <span className="stat-label-text">Input tokens</span>
+                  <span className="stat-value-text">{usage.inputTokens}</span>
+                </div>
+                <div className="stat-row-item">
+                  <span className="stat-label-text">Cached input</span>
+                  <span className="stat-value-text">{usage.cachedInputTokens}</span>
+                </div>
+                <div className="stat-row-item">
+                  <span className="stat-label-text">Output tokens</span>
+                  <span className="stat-value-text">{usage.outputTokens}</span>
+                </div>
+              </div>
+            )}
+            <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+              <button className="btn-action" onClick={refreshUsage}>Refresh Usage</button>
+              <button className="btn-action" onClick={resetUsage}>Reset Counter</button>
+            </div>
+          </div>
+
           {/* API Key */}
           <div className="panel">
-            <h3 className="panel-title">CLASSIC AI (CLAUDE) - API KEY</h3>
+            <h3 className="panel-title">ANTHROPIC API KEY</h3>
             <div className="settings-field">
-              <label>Anthropic API Key</label>
+              <label>API Key</label>
               <input type="password" className="settings-input" placeholder="sk-ant-..."
                 value={apiKey} onChange={e => setApiKey(e.target.value)} />
             </div>
@@ -172,8 +252,55 @@ export function Settings() {
               Apply Key
             </button>
             <p className="settings-note" style={{ marginTop: 6 }}>
-              Used for Classic AI mode. Get a key at console.anthropic.com.
+              Required for Premium. Get a key at console.anthropic.com.
             </p>
+          </div>
+
+          {/* Push-to-Talk */}
+          <div className="panel">
+            <h3 className="panel-title">PUSH-TO-TALK</h3>
+            <p className="settings-note">
+              Hold a keyboard key or wheel button to ask the engineer something.
+              {!ptt.supported && ' Speech recognition is not available on this system.'}
+            </p>
+            <div className="stat-list">
+              <div className="stat-row-item">
+                <span className="stat-label-text">Binding</span>
+                <span className="stat-value-text">
+                  {ptt.binding ? (ptt.binding.label || `${ptt.binding.kind}:${ptt.binding.code}`) : '— not set —'}
+                </span>
+              </div>
+              <div className="stat-row-item">
+                <span className="stat-label-text">Status</span>
+                <span className={`stat-value-text ${ptt.listening ? 'status-on' : ''}`}>
+                  {ptt.isLearning ? 'Press any key / button…' :
+                   ptt.listening ? 'Listening' :
+                   ptt.lastError ? `Error: ${ptt.lastError}` : 'Idle'}
+                </span>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+              {!ptt.isLearning ? (
+                <>
+                  <button className="btn-action" onClick={() => ptt.startLearn('keyboard')}>
+                    Bind Keyboard Key
+                  </button>
+                  <button className="btn-action" onClick={() => ptt.startLearn('gamepad')}>
+                    Bind Wheel / Gamepad Button
+                  </button>
+                  {ptt.binding && (
+                    <button className="btn-action" onClick={ptt.clearBinding}>Clear</button>
+                  )}
+                </>
+              ) : (
+                <button className="btn-action" onClick={ptt.cancelLearn}>Cancel</button>
+              )}
+            </div>
+            {ptt.lastTranscript && (
+              <p className="settings-note" style={{ marginTop: 8 }}>
+                Last heard: "<em>{ptt.lastTranscript}</em>"
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -184,7 +311,7 @@ export function Settings() {
           {saveStatus || 'Save All Settings'}
         </button>
         <p className="settings-note">
-          Saves API keys, TTS config, and telemetry port to disk.
+          Saves API key, Premium flag, TTS, PTT binding, and telemetry port to disk.
         </p>
       </div>
     </div>

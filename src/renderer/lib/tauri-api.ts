@@ -22,6 +22,24 @@ export const api = {
   setApiKey: (key: string) =>
     invoke<void>('set_api_key', { key }),
 
+  setPremium: (enabled: boolean) =>
+    invoke<void>('set_premium', { enabled }),
+
+  getPremium: () =>
+    invoke<{ premium: boolean; hasApiKey: boolean }>('get_premium'),
+
+  getUsage: () =>
+    invoke<{
+      inputTokens: number;
+      cachedInputTokens: number;
+      cacheCreationTokens: number;
+      outputTokens: number;
+      costUsd: number;
+    }>('get_usage'),
+
+  resetUsage: () =>
+    invoke<void>('reset_usage'),
+
   loadSettings: () =>
     invoke<any>('load_settings'),
 
@@ -38,11 +56,38 @@ export const api = {
     invoke<any>('get_lookups'),
 
   askEngineer: (payload: { question: string; context?: any; mode?: string }) =>
-    invoke<{ response?: string; error?: string }>('ask_engineer', { payload }),
+    invoke<{ response?: string; error?: string; message?: string }>('ask_engineer', { payload }),
+
+  callStrategy: (payload: { snapshot: any; trigger: string; question?: string }) =>
+    invoke<{ decision?: StrategyDecision; trigger?: string; error?: string; message?: string }>(
+      'call_strategy',
+      { payload },
+    ),
 
   ttsSpeak: (payload: { text: string; voice?: string }) =>
     invoke<string>('tts_speak', { payload }),
 };
+
+// ── Shared types ─────────────────────────────────────────────────────────────
+
+export type StrategyAction =
+  | 'pit_now' | 'pit_next_lap' | 'pit_in_n_laps' | 'stay_out'
+  | 'push' | 'save_tyres' | 'save_fuel' | 'manage_ers'
+  | 'defend' | 'attack_undercut' | 'attack_overcut' | 'hold_position';
+
+export type StrategyCompound = 'soft' | 'medium' | 'hard' | 'inter' | 'wet' | null;
+
+export interface StrategyDecision {
+  action: StrategyAction;
+  targetLap?: number | null;
+  targetCompound?: StrategyCompound;
+  confidence: number;
+  urgency: 'low' | 'medium' | 'high' | 'critical';
+  reasoning: string;
+  radioMessage: string;
+  alternativeAction?: string | null;
+  triggerConditions?: string[];
+}
 
 // ── Event listeners ───────────────────────────────────────────────────────────
 // Each returns an UnlistenFn — call it to remove the listener.

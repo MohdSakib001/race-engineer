@@ -1536,6 +1536,88 @@ body {
 }
 .btn-save-all:hover { background: #00e8d0; }
 
+/* ── Strategy banner ── */
+.strategy-banner {
+  margin: 10px 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(0, 210, 190, 0.10), rgba(0, 210, 190, 0.02));
+  border-left: 4px solid #00D2BE;
+}
+.strategy-banner.urgency-critical {
+  background: linear-gradient(135deg, rgba(255, 51, 51, 0.14), rgba(255, 51, 51, 0.04));
+  border-left-color: #ff3333;
+}
+.strategy-banner.urgency-high {
+  background: linear-gradient(135deg, rgba(255, 200, 0, 0.12), rgba(255, 200, 0, 0.03));
+  border-left-color: #ffc800;
+}
+.strategy-action {
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.strategy-confidence {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 11px;
+  opacity: 0.7;
+  font-weight: 600;
+}
+.strategy-radio {
+  margin-top: 6px;
+  font-style: italic;
+  font-size: 15px;
+  color: #e8fffa;
+}
+.strategy-reason {
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.75;
+  line-height: 1.4;
+}
+
+/* ── Push-to-talk button ── */
+.ptt-btn {
+  padding: 12px 20px;
+  border: 2px solid #00D2BE;
+  background: rgba(0, 210, 190, 0.08);
+  color: #00D2BE;
+  border-radius: var(--radius);
+  font-weight: 800;
+  font-size: 13px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  transition: all 0.12s ease;
+  user-select: none;
+  white-space: nowrap;
+}
+.ptt-btn:hover:not(:disabled) { background: rgba(0, 210, 190, 0.16); }
+.ptt-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.ptt-btn.ptt-active {
+  background: #ff3333;
+  color: #fff;
+  border-color: #ff3333;
+  box-shadow: 0 0 0 4px rgba(255, 51, 51, 0.25);
+  animation: pttPulse 0.8s ease infinite alternate;
+}
+@keyframes pttPulse {
+  from { box-shadow: 0 0 0 4px rgba(255, 51, 51, 0.25); }
+  to   { box-shadow: 0 0 0 10px rgba(255, 51, 51, 0.08); }
+}
+
+.btn-link {
+  background: transparent;
+  border: none;
+  color: #00D2BE;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+  font: inherit;
+}
+
 /* ── Responsive ── */
 @media (max-width: 1200px) {
   .dashboard-row { flex-direction: column; }
