@@ -1091,13 +1091,56 @@ body {
 }
 .trackmap-svg-container {
   flex: 1;
-  background: var(--bg1);
+  /* Slightly lighter than --bg1 with a subtle radial vignette so the
+     dark-track + colored-cars combo has more contrast. */
+  background:
+    radial-gradient(ellipse at center, #2a3045 0%, #181c2c 70%, #11141f 100%);
   border-radius: var(--radius);
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 300px;
   overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+.trackmap-svg-container .corner-label {
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.85);
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+.trackmap-svg-container .car-name-label {
+  /* Pill-backed names: no stroke halo needed, just clean thin white */
+  pointer-events: none;
+}
+.trackmap-svg-container .car-name-pill { pointer-events: none; }
+.trackmap-svg-container .car-dot {
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.6));
+}
+.trackmap-svg-container .car-fx { pointer-events: none; }
+@keyframes tm-pulse {
+  0%   { opacity: 0.85; transform: scale(1); }
+  50%  { opacity: 0.3;  transform: scale(1.6); }
+  100% { opacity: 0.85; transform: scale(1); }
+}
+.trackmap-svg-container .car-fx-flying {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: tm-pulse 1.1s ease-in-out infinite;
+}
+
+/* ── TrackMap Record-Lap button ───────────────────────────────────── */
+.trackmap-controls .record-btn {
+  border: 1px solid #00d2be;
+  color: #00d2be;
+  background: rgba(0, 210, 190, 0.08);
+}
+.trackmap-controls .record-btn:hover { background: rgba(0, 210, 190, 0.18); }
+.trackmap-controls .record-btn.recording {
+  border-color: #ff3333;
+  color: #ff3333;
+  background: rgba(255, 51, 51, 0.12);
+  animation: tm-pulse 1.3s ease-in-out infinite;
 }
 .trackmap-no-data { color: var(--text-dim); font-size: 13px; }
 .trackmap-sidebar {
@@ -1627,3 +1670,454 @@ body {
   .trackmap-layout { flex-direction: column; }
   .trackmap-sidebar { width: 100%; min-width: 0; }
 }
+
+/* ── Phase 1 additions: rival, modal, penalties, timer, hotkeys ── */
+kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  margin: 0 2px;
+  font-family: inherit;
+  font-size: 10px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px;
+  color: #cfd2d6;
+}
+
+.th-clickable { cursor: pointer; user-select: none; }
+.th-clickable:hover { color: #00d2be; }
+.gap-both { display: flex; flex-direction: column; line-height: 1.15; }
+.gap-both .gap-interval { font-size: 10px; opacity: 0.65; }
+.pen-cell, .warn-cell { font-weight: 600; }
+
+.rival-row { background: rgba(255, 152, 0, 0.08) !important; }
+.rival-row:hover { background: rgba(255, 152, 0, 0.14) !important; }
+.rival-badge {
+  margin-left: 6px;
+  color: #ff9800;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.nav-badge {
+  margin-left: auto;
+  color: #ff9800;
+  font-size: 11px;
+}
+
+.btn-rival-active {
+  background: rgba(255,152,0,0.15) !important;
+  border-color: #ff9800 !important;
+  color: #ff9800 !important;
+}
+
+/* Session timer chip */
+.session-timer {
+  margin: 8px 12px 4px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  background: rgba(0,0,0,0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.session-timer-label {
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: #888;
+  text-transform: uppercase;
+}
+.session-timer-value {
+  font-family: 'Consolas', monospace;
+  font-size: 18px;
+  font-weight: 700;
+  color: #e0e0e8;
+}
+.session-timer-elapsed {
+  font-size: 10px;
+  color: #777;
+}
+.session-timer-warn .session-timer-value { color: #ff8700; animation: pulse 1s infinite; }
+@keyframes pulse {
+  50% { opacity: 0.6; }
+}
+
+/* Modal */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 200;
+  padding: 40px 20px;
+  overflow-y: auto;
+}
+.modal-panel {
+  background: #121218;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 10px;
+  width: min(960px, 100%);
+  padding: 20px 24px;
+  box-shadow: 0 18px 60px rgba(0,0,0,0.5);
+}
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.modal-title {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: 0.02em;
+}
+.modal-subtitle {
+  font-size: 12px;
+  color: #888;
+  margin-top: 2px;
+}
+.modal-actions { display: flex; gap: 8px; }
+.modal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.modal-laps { max-height: 360px; overflow-y: auto; }
+
+/* Rival page */
+.rival-picker { padding: 16px; }
+.rival-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.rival-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  padding: 10px 12px;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+.rival-card:hover {
+  border-color: #ff9800;
+  background: rgba(255,152,0,0.07);
+}
+.rival-card-pos { font-size: 12px; color: #888; }
+.rival-card-name { font-weight: 600; font-size: 14px; }
+.rival-card-best { font-family: 'Consolas', monospace; color: #00d2be; font-size: 12px; }
+
+.rival-page { padding: 16px; }
+.rival-header {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  padding-bottom: 12px;
+  margin-bottom: 14px;
+}
+.rival-header-actions { display: flex; gap: 8px; }
+.rival-delta {
+  display: flex; align-items: baseline; justify-content: center; gap: 14px;
+  background: rgba(255,152,0,0.08);
+  border: 1px solid rgba(255,152,0,0.2);
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+.rival-delta-label { font-size: 11px; letter-spacing: 0.15em; color: #888; }
+.rival-delta-value { font-size: 34px; font-family: 'Consolas', monospace; font-weight: 700; }
+
+.rival-grid-compare {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+.compare-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 1fr;
+  padding: 5px 0;
+  border-bottom: 1px dashed rgba(255,255,255,0.05);
+  font-family: 'Consolas', monospace;
+  font-size: 13px;
+}
+.compare-label { color: #888; }
+.compare-you { color: #00d2be; text-align: right; padding-right: 10px; }
+.compare-rival { color: #ff9800; text-align: right; }
+
+/* Name mask editor */
+.mask-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.mask-row input { width: 100%; }
+.btn-mask-del { color: #dc0000; }
+
+.page-empty-inline {
+  padding: 20px;
+  text-align: center;
+  color: #888;
+  font-size: 12px;
+}
+
+/* ── Phase 2: trackmap controls ── */
+.trackmap-controls {
+  display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+  margin-left: auto;
+}
+.trackmap-controls .btn-small { min-width: 30px; }
+.trackmap-check {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; color: #b0b0b8;
+  padding: 2px 6px;
+  border-left: 1px solid rgba(255,255,255,0.08);
+  margin-left: 4px;
+}
+.trackmap-header {
+  display: flex; align-items: center; gap: 12px;
+}
+.trackmap-svg-container { user-select: none; }
+.trackmap-car-item.rival {
+  border-left: 2px solid #ff9800;
+  background: rgba(255,152,0,0.06);
+}
+
+/* ── Phase 3: Tyre life estimator ── */
+.tyrelife-target-row {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 10px;
+  font-size: 12px; color: #b0b0b8;
+}
+.tyrelife-target-row label { white-space: nowrap; }
+.tyrelife-target-row input[type="range"] { flex: 1; }
+.tyrelife-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.tyrelife-cell {
+  padding: 8px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  text-align: center;
+  background: rgba(255,255,255,0.02);
+}
+.tyrelife-safe  { border-color: rgba(57,181,74,0.4); }
+.tyrelife-watch { border-color: rgba(255,215,0,0.45); background: rgba(255,215,0,0.05); }
+.tyrelife-crit  { border-color: rgba(220,0,0,0.5);   background: rgba(220,0,0,0.07); }
+.tyrelife-label { font-size: 11px; letter-spacing: 0.1em; color: #888; }
+.tyrelife-wear  { font-family: 'Consolas', monospace; font-size: 18px; font-weight: 700; color: #e0e0e8; }
+.tyrelife-rate  { font-size: 10px; color: #888; }
+.tyrelife-laps  { font-size: 11px; font-weight: 600; color: #00d2be; margin-top: 3px; }
+.tyrelife-crit .tyrelife-laps { color: #dc0000; }
+.tyrelife-watch .tyrelife-laps { color: #ffd700; }
+
+/* ── Phase 3: Launch guide ── */
+.launch-guide {
+  margin-bottom: 10px;
+  border-left: 3px solid #ff9800;
+}
+.launch-header { display: flex; align-items: center; gap: 8px; }
+.launch-ok {
+  color: #39b54a; font-weight: 700; font-size: 12px;
+  margin-left: auto;
+  animation: pulse 1s infinite;
+}
+.launch-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 70px;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0;
+}
+.launch-label { font-size: 11px; color: #888; letter-spacing: 0.05em; }
+.launch-val { font-family: 'Consolas', monospace; font-size: 13px; text-align: right; }
+.launch-bar {
+  position: relative;
+  height: 14px;
+  background: #1a1a2e;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.launch-bar-target {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: rgba(57,181,74,0.18);
+  border-left: 1px dashed rgba(57,181,74,0.4);
+  border-right: 1px dashed rgba(57,181,74,0.4);
+}
+.launch-bar-fill {
+  position: relative;
+  height: 100%;
+  transition: width 60ms linear;
+}
+.launch-targets {
+  display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px;
+  font-size: 11px; color: #888;
+}
+.launch-targets label { display: inline-flex; align-items: center; gap: 6px; }
+.launch-input { width: 72px !important; padding: 2px 4px !important; }
+
+/* ── Phase 4: Driver switcher ── */
+.driver-switcher {
+  margin: 6px 12px 4px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 6px;
+  background: rgba(0,0,0,0.2);
+}
+.driver-switcher-title {
+  font-size: 9px; letter-spacing: 0.15em; color: #666; margin-bottom: 6px;
+}
+.driver-slot-row {
+  display: flex; align-items: center; gap: 4px; margin-bottom: 4px;
+}
+.driver-slot-pill {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: transparent;
+  color: #b0b0b8;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+  text-align: left;
+}
+.driver-slot-pill:hover { border-color: #00d2be; color: #e0e0e8; }
+.driver-slot-pill.active {
+  border-color: #00d2be;
+  background: rgba(0,210,190,0.1);
+  color: #00d2be;
+}
+.dot-live {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #39b54a; margin-left: auto;
+  animation: pulse 1.4s infinite;
+}
+.driver-slot-row .btn-small {
+  min-width: 26px; padding: 3px 6px; font-size: 11px;
+}
+.driver-switcher-locked {
+  margin: 6px 12px 4px;
+  padding: 6px 10px;
+  display: flex; align-items: center; gap: 8px;
+  border: 1px dashed rgba(255,255,255,0.08);
+  border-radius: 6px;
+}
+
+/* ── Phase 5: Subscription ── */
+.sub-badge {
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  vertical-align: middle;
+}
+.sub-active   { background: rgba(57,181,74,0.15);   color: #39b54a;   border: 1px solid #39b54a; }
+.sub-inactive { background: rgba(255,255,255,0.04); color: #888;      border: 1px solid rgba(255,255,255,0.1); }
+.sub-actions  { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.sub-alert    { margin-top: 10px; padding: 8px 10px; border-radius: 4px; font-size: 12px; }
+.sub-alert-ok  { background: rgba(57,181,74,0.1); color: #39b54a; border: 1px solid rgba(57,181,74,0.25); }
+.sub-alert-err { background: rgba(220,0,0,0.1);    color: #ff6b6b; border: 1px solid rgba(220,0,0,0.25); }
+.sub-subhead {
+  margin-top: 14px; margin-bottom: 6px;
+  font-size: 10px; letter-spacing: 0.12em; color: #888;
+}
+.btn-danger {
+  background: rgba(220,0,0,0.1) !important;
+  border-color: rgba(220,0,0,0.3) !important;
+  color: #ff6b6b !important;
+}
+.key-input.key-valid   { border-color: #39b54a !important; }
+.key-input.key-invalid { border-color: #dc0000 !important; }
+.key-input.key-validating { opacity: 0.7; }
+
+/* ── Phase 6: Stream overlay ── */
+.overlay-root {
+  width: 100vw; height: 100vh;
+  background: rgba(0, 0, 0, 0.82);
+  border: 1px solid rgba(0, 210, 190, 0.3);
+  border-radius: 8px;
+  padding: 8px 14px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Inter', system-ui, sans-serif;
+  color: #e0e0e8;
+  box-sizing: border-box;
+  user-select: none;
+  overflow: hidden;
+}
+.overlay-row {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(60px, 1fr));
+  gap: 14px;
+  width: 100%;
+  align-items: center;
+}
+.ov-cell {
+  display: flex; flex-direction: column; gap: 2px;
+  border-left: 1px solid rgba(255,255,255,0.08);
+  padding-left: 10px;
+}
+.ov-cell:first-child { border-left: none; padding-left: 0; }
+.ov-label { font-size: 9px; letter-spacing: 0.15em; color: #888; text-transform: uppercase; }
+.ov-val   { font-size: 15px; font-weight: 600; color: #e0e0e8; }
+.ov-big   { font-size: 28px; font-weight: 800; color: #00d2be; line-height: 1; }
+.ov-val.mono, .ov-cell .mono { font-family: 'Consolas', monospace; }
+
+/* ── Radio messages panel (Dashboard) ─────────────────────────── */
+.radio-panel {
+  background: rgba(20, 24, 36, 0.7); border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column;
+  min-height: 220px; max-height: 320px;
+}
+.radio-panel h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: 0.15em; color: #888; }
+.radio-panel-header {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;
+}
+.radio-tts-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10px; letter-spacing: 0.1em; color: #aaa; cursor: pointer;
+  user-select: none;
+}
+.radio-tts-toggle input { accent-color: #00d2be; }
+.radio-msg-list {
+  flex: 1; overflow-y: auto; display: flex; flex-direction: column-reverse;
+  gap: 4px; padding-right: 4px;
+}
+.radio-msg {
+  display: flex; gap: 8px; padding: 5px 8px; border-radius: 4px;
+  background: rgba(255,255,255,0.03); font-size: 12px; line-height: 1.35;
+}
+.radio-msg-time { color: #666; font-family: 'Consolas', monospace; font-size: 10px; min-width: 46px; }
+.radio-msg-text { color: #ddd; flex: 1; }
+.radio-msg.kind-penalty   { border-left: 3px solid #ff8700; }
+.radio-msg.kind-warning   { border-left: 3px solid #ffd700; }
+.radio-msg.kind-flag      { border-left: 3px solid #ff3333; }
+.radio-msg.kind-overtake  { border-left: 3px solid #00d2be; }
+.radio-msg.kind-safety_car{ border-left: 3px solid #ff3333; }
+.radio-msg.kind-info      { border-left: 3px solid #4477ff; }
+.radio-msg.kind-fastest   { border-left: 3px solid #c266ff; }
+.radio-empty { color: #666; font-style: italic; padding: 14px 8px; text-align: center; font-size: 11px; }
+
+/* ── Sidebar nav popout button ────────────────────────────────── */
+.nav-item { position: relative; }
+.nav-popout-btn {
+  margin-left: auto; padding: 2px 6px; border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.04); color: #aaa; border-radius: 3px;
+  font-size: 11px; cursor: pointer; opacity: 0; transition: opacity 0.12s;
+}
+.nav-item:hover .nav-popout-btn { opacity: 1; }
+.nav-popout-btn:hover { background: rgba(0,210,190,0.18); color: #fff; border-color: #00d2be; }
+

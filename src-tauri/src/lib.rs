@@ -3,21 +3,33 @@ mod telemetry;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
-use telemetry::{SharedState, TelemetryHandle, TelemetryState};
+use telemetry::{SharedState, TelemetryHandle, TelemetryState, PRIMARY_SLOT};
 
 // ── App-level state ───────────────────────────────────────────────────────────
+/// Holds per-slot telemetry listeners. "primary" is the default slot used by
+/// the main window; additional slots can be started for multi-driver engineering.
 struct AppState {
-    telemetry: SharedState,
-    telemetry_handle: Option<TelemetryHandle>,
+    slots: HashMap<String, SharedState>,
+    handles: HashMap<String, TelemetryHandle>,
     api_key: Option<String>,
     premium: bool,
     usage_input_tokens: u64,
     usage_cached_input_tokens: u64,
     usage_output_tokens: u64,
     usage_cache_creation_tokens: u64,
+}
+
+impl AppState {
+    fn telemetry_state(&mut self, slot: &str) -> SharedState {
+        self.slots
+            .entry(slot.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(TelemetryState::default())))
+            .clone()
+    }
 }
 
 type SafeAppState = Arc<Mutex<AppState>>;
@@ -27,49 +39,366 @@ type SafeAppState = Arc<Mutex<AppState>>;
 #[tauri::command]
 async fn start_telemetry(
     port: Option<u16>,
+    slot: Option<String>,
     state: State<'_, SafeAppState>,
     app: AppHandle,
 ) -> Result<Value, String> {
     let port = port.unwrap_or(telemetry::DEFAULT_PORT);
+    let slot_name = slot.unwrap_or_else(|| PRIMARY_SLOT.to_string());
     let (telemetry_state, old_handle) = {
         let mut s = state.lock().map_err(|_| "Lock error")?;
-        let ts = s.telemetry.clone();
-        let old = s.telemetry_handle.take();
+        let ts = s.telemetry_state(&slot_name);
+        let old = s.handles.remove(&slot_name);
         (ts, old)
     };
 
-    // Stop previous listener if any
     if let Some(h) = old_handle {
         let _ = h.shutdown.send(());
     }
 
-    let handle = telemetry::start_udp_listener(port, telemetry_state, app).await?;
-    state.lock().map_err(|_| "Lock error")?.telemetry_handle = Some(handle);
-    Ok(json!({ "success": true, "port": port }))
+    let handle = telemetry::start_udp_listener(slot_name.clone(), port, telemetry_state, app).await?;
+    state.lock().map_err(|_| "Lock error")?.handles.insert(slot_name.clone(), handle);
+    Ok(json!({ "success": true, "port": port, "slot": slot_name }))
 }
 
 #[tauri::command]
 fn stop_telemetry(
+    slot: Option<String>,
     state: State<'_, SafeAppState>,
     app: AppHandle,
 ) -> Result<Value, String> {
     let mut s = state.lock().map_err(|_| "Lock error")?;
-    if let Some(h) = s.telemetry_handle.take() {
+    let slot_name = slot.unwrap_or_else(|| PRIMARY_SLOT.to_string());
+    if let Some(h) = s.handles.remove(&slot_name) {
         let _ = h.shutdown.send(());
     }
-    let _ = app.emit("telemetry-stopped", json!({}));
+    let event = if slot_name == PRIMARY_SLOT {
+        "telemetry-stopped".to_string()
+    } else {
+        format!("telemetry-stopped::{}", slot_name)
+    };
+    let _ = app.emit(&event, json!({ "slot": slot_name.clone() }));
+    Ok(json!({ "success": true, "slot": slot_name }))
+}
+
+#[tauri::command]
+fn list_telemetry_slots(state: State<'_, SafeAppState>) -> Result<Value, String> {
+    let s = state.lock().map_err(|_| "Lock error")?;
+    let slots: Vec<Value> = s.handles.iter()
+        .map(|(slot, handle)| json!({ "slot": slot, "port": handle.port }))
+        .collect();
+    Ok(json!({ "slots": slots }))
+}
+
+#[tauri::command]
+async fn open_driver_window(
+    slot: String,
+    app: AppHandle,
+) -> Result<Value, String> {
+    let label = format!("driver-{}", slot);
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.set_focus();
+        return Ok(json!({ "success": true, "reused": true }));
+    }
+    let url = WebviewUrl::App(format!("index.html?slot={}", slot).into());
+    WebviewWindowBuilder::new(&app, &label, url)
+        .title(&format!("Apex Engineer — Driver {}", slot))
+        .inner_size(1440.0, 900.0)
+        .min_inner_size(1100.0, 700.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(json!({ "success": true, "reused": false, "label": label }))
+}
+
+/// Opens a single page (e.g. "timing", "rival") in its own window. The page
+/// renders without the sidebar so the user can dock it side-by-side.
+#[tauri::command]
+async fn open_page_window(
+    page: String,
+    slot: Option<String>,
+    app: AppHandle,
+) -> Result<Value, String> {
+    let safe_page: String = page.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if safe_page.is_empty() {
+        return Err("Invalid page name".into());
+    }
+    let slot_name = slot.unwrap_or_else(|| PRIMARY_SLOT.to_string());
+    let label = format!("page-{}-{}", safe_page, slot_name);
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.set_focus();
+        return Ok(json!({ "success": true, "reused": true, "label": label }));
+    }
+    let url = WebviewUrl::App(
+        format!("index.html?page={}&slot={}", safe_page, slot_name).into(),
+    );
+    WebviewWindowBuilder::new(&app, &label, url)
+        .title(&format!("Apex — {}", safe_page))
+        .inner_size(1200.0, 800.0)
+        .min_inner_size(700.0, 500.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(json!({ "success": true, "reused": false, "label": label }))
+}
+
+/// Spawns a compact always-on-top overlay window (for OBS / stream use).
+#[tauri::command]
+async fn open_overlay_window(
+    slot: Option<String>,
+    app: AppHandle,
+) -> Result<Value, String> {
+    let slot = slot.unwrap_or_else(|| "primary".to_string());
+    let label = "overlay";
+    if let Some(existing) = app.get_webview_window(label) {
+        let _ = existing.set_focus();
+        return Ok(json!({ "success": true, "reused": true }));
+    }
+    let url = WebviewUrl::App(format!("index.html?overlay=1&slot={}", slot).into());
+    WebviewWindowBuilder::new(&app, label, url)
+        .title("Apex Overlay")
+        .inner_size(560.0, 140.0)
+        .min_inner_size(360.0, 80.0)
+        .always_on_top(true)
+        .decorations(false)
+        .transparent(true)
+        .resizable(true)
+        .build()
+        .map_err(|e| e.to_string())?;
     Ok(json!({ "success": true }))
+}
+
+/// Configure LAN relay for a slot. Pass `None` host to disable.
+#[tauri::command]
+fn set_lan_relay(
+    slot: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    state: State<'_, SafeAppState>,
+) -> Result<Value, String> {
+    let slot_name = slot.unwrap_or_else(|| PRIMARY_SLOT.to_string());
+    let mut s = state.lock().map_err(|_| "Lock error")?;
+    let ts_arc = s.telemetry_state(&slot_name);
+    let mut ts = ts_arc.lock().map_err(|_| "Lock error")?;
+    ts.lan_relay = match (host, port) {
+        (Some(h), Some(p)) if !h.trim().is_empty() => Some(format!("{}:{}", h.trim(), p)),
+        _ => None,
+    };
+    let active = ts.lan_relay.clone();
+    Ok(json!({ "success": true, "slot": slot_name, "relay": active }))
 }
 
 #[tauri::command]
 fn set_manual_track(
     track_id: i8,
+    slot: Option<String>,
     state: State<'_, SafeAppState>,
 ) -> Result<Value, String> {
-    let s = state.lock().map_err(|_| "Lock error")?;
-    let mut ts = s.telemetry.lock().map_err(|_| "Lock error")?;
+    let slot_name = slot.unwrap_or_else(|| PRIMARY_SLOT.to_string());
+    let mut s = state.lock().map_err(|_| "Lock error")?;
+    let ts_arc = s.telemetry_state(&slot_name);
+    let mut ts = ts_arc.lock().map_err(|_| "Lock error")?;
     ts.manual_track_id = if track_id == -1 { None } else { Some(track_id) };
+    Ok(json!({ "success": true, "slot": slot_name }))
+}
+
+// ── Track-trace recording ────────────────────────────────────────────────────
+/// Arms the lap-trace recorder on the given slot for the current track.
+/// Recording actually starts when the player next crosses the start/finish
+/// line (detected via lapDistance wrap) and stops after one full lap. The
+/// renderer listens for `track-trace-complete` event and persists the data.
+#[tauri::command]
+fn start_track_trace(
+    slot: Option<String>,
+    state: State<'_, SafeAppState>,
+) -> Result<Value, String> {
+    let slot_name = slot.unwrap_or_else(|| PRIMARY_SLOT.to_string());
+    let mut s = state.lock().map_err(|_| "Lock error")?;
+    let ts_arc = s.telemetry_state(&slot_name);
+    let mut ts = ts_arc.lock().map_err(|_| "Lock error")?;
+    let Some(track_id) = ts.current_track_id else {
+        return Ok(json!({ "success": false, "error": "No active track" }));
+    };
+    ts.recording_track = Some(track_id);
+    ts.recording_samples.clear();
+    ts.recording_started_at_lap = false;
+    ts.recording_last_lap_distance = 0.0;
+    Ok(json!({ "success": true, "trackId": track_id, "slot": slot_name }))
+}
+
+#[tauri::command]
+fn stop_track_trace(
+    slot: Option<String>,
+    state: State<'_, SafeAppState>,
+) -> Result<Value, String> {
+    let slot_name = slot.unwrap_or_else(|| PRIMARY_SLOT.to_string());
+    let mut s = state.lock().map_err(|_| "Lock error")?;
+    let ts_arc = s.telemetry_state(&slot_name);
+    let mut ts = ts_arc.lock().map_err(|_| "Lock error")?;
+    ts.recording_track = None;
+    ts.recording_samples.clear();
+    ts.recording_started_at_lap = false;
     Ok(json!({ "success": true }))
+}
+
+fn trace_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let base = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(base.join("track-traces"))
+}
+
+/// Saves a completed trace to disk. Called from the renderer after it
+/// receives the `track-trace-complete` event.
+#[tauri::command]
+fn save_track_trace(
+    track_id: i8,
+    samples: Vec<(f32, f32)>,
+    app: AppHandle,
+) -> Result<Value, String> {
+    if samples.is_empty() {
+        return Ok(json!({ "success": false, "error": "empty trace" }));
+    }
+    let dir = trace_dir(&app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{}.json", track_id));
+    let (mut min_x, mut max_x, mut min_z, mut max_z) =
+        (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for &(x, z) in &samples {
+        if x < min_x { min_x = x; }
+        if x > max_x { max_x = x; }
+        if z < min_z { min_z = z; }
+        if z > max_z { max_z = z; }
+    }
+    let body = json!({
+        "trackId": track_id,
+        "samples": samples,
+        "bbox": { "minX": min_x, "maxX": max_x, "minZ": min_z, "maxZ": max_z },
+        "recordedAt": chrono_now(),
+    });
+    std::fs::write(&path, serde_json::to_string(&body).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(json!({ "success": true, "path": path.to_string_lossy() }))
+}
+
+#[tauri::command]
+fn load_track_trace(track_id: i8, app: AppHandle) -> Result<Value, String> {
+    let path = trace_dir(&app)?.join(format!("{}.json", track_id));
+    match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
+        Err(_) => Ok(Value::Null),
+    }
+}
+
+#[tauri::command]
+fn list_track_traces(app: AppHandle) -> Result<Value, String> {
+    let dir = trace_dir(&app)?;
+    if !dir.exists() { return Ok(json!([])); }
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        if let Some(name) = entry.path().file_stem().and_then(|s| s.to_str()) {
+            if let Ok(id) = name.parse::<i8>() { ids.push(id); }
+        }
+    }
+    Ok(json!(ids))
+}
+
+// ── Team Telemetry 25 BYO-data import ─────────────────────────────────────────
+// Reads the user's locally-installed TT data from the path they configure.
+// Files are NOT copied into our app — we read them on demand only.
+//
+// Layout we expect (relative to the configured root):
+//   Tracks/Track_<id>.csv               racing line samples (distance;X;Z;0)
+//   Tracks/Box_<id>.csv                 pit lane samples    (distance;X;Z)
+//   Tracks/Description/Track_Settings_<id>.csv   key;value pairs
+fn parse_xz_csv(text: &str, has_trailing_zero: bool) -> Vec<[f64; 2]> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split(';').collect();
+        let needed = if has_trailing_zero { 4 } else { 3 };
+        if parts.len() < needed { continue; }
+        let x = match parts[1].trim().parse::<f64>() { Ok(v) => v, Err(_) => continue };
+        let z = match parts[2].trim().parse::<f64>() { Ok(v) => v, Err(_) => continue };
+        out.push([x, z]);
+    }
+    out
+}
+
+fn parse_tt_settings(text: &str) -> Value {
+    // First line is human readable ("Settings for Track-ID 20 Baku;20"); the
+    // rest are `key;value` lines, with some "!Comment:" lines we ignore.
+    let mut map = serde_json::Map::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 || line.starts_with("!") || line.is_empty() { continue; }
+        let mut it = line.splitn(2, ';');
+        let key = it.next().unwrap_or("").trim();
+        let value = it.next().unwrap_or("").trim();
+        if key.is_empty() { continue; }
+        // Try to parse as number, fall back to string
+        let v = if let Ok(n) = value.parse::<f64>() {
+            json!(n)
+        } else if value.eq_ignore_ascii_case("true") {
+            json!(true)
+        } else if value.eq_ignore_ascii_case("false") {
+            json!(false)
+        } else {
+            json!(value)
+        };
+        map.insert(key.to_string(), v);
+    }
+    Value::Object(map)
+}
+
+#[tauri::command]
+fn load_tt_track(track_id: i8, tt_path: String) -> Result<Value, String> {
+    let root = std::path::PathBuf::from(&tt_path);
+    let tracks = root.join("Tracks");
+    let track_file = tracks.join(format!("Track_{}.csv", track_id));
+    let box_file = tracks.join(format!("Box_{}.csv", track_id));
+    let settings_file = tracks
+        .join("Description")
+        .join(format!("Track_Settings_{}.csv", track_id));
+
+    let racing_line = std::fs::read_to_string(&track_file)
+        .map(|s| parse_xz_csv(&s, true))
+        .unwrap_or_default();
+    let pit_lane = std::fs::read_to_string(&box_file)
+        .map(|s| parse_xz_csv(&s, false))
+        .unwrap_or_default();
+    let settings = std::fs::read_to_string(&settings_file)
+        .map(|s| parse_tt_settings(&s))
+        .unwrap_or(Value::Null);
+
+    if racing_line.is_empty() {
+        return Ok(json!({ "found": false, "trackId": track_id }));
+    }
+
+    // Compute racing-line bbox + path length so the renderer can derive a
+    // motion → TT scale factor without having to traverse the points itself.
+    let mut min_x = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut min_z = f64::MAX;
+    let mut max_z = f64::MIN;
+    for &[x, z] in &racing_line {
+        if x < min_x { min_x = x; }
+        if x > max_x { max_x = x; }
+        if z < min_z { min_z = z; }
+        if z > max_z { max_z = z; }
+    }
+    let mut path_len = 0.0;
+    for w in racing_line.windows(2) {
+        let dx = w[1][0] - w[0][0];
+        let dz = w[1][1] - w[0][1];
+        path_len += (dx * dx + dz * dz).sqrt();
+    }
+
+    Ok(json!({
+        "found": true,
+        "trackId": track_id,
+        "racingLine": racing_line,
+        "pitLane": pit_lane,
+        "settings": settings,
+        "bbox": { "minX": min_x, "maxX": max_x, "minZ": min_z, "maxZ": max_z },
+        "pathLength": path_len,
+    }))
 }
 
 #[tauri::command]
@@ -93,6 +422,68 @@ fn get_premium(state: State<'_, SafeAppState>) -> Result<Value, String> {
         "premium": s.premium,
         "hasApiKey": s.api_key.is_some(),
     }))
+}
+
+/// Validates an Anthropic API key by making a minimal Messages call and
+/// inspecting the response. Returns `{ valid: bool, error?: string, model?: string }`.
+/// This updates usage counters with the tokens consumed by the probe.
+#[tauri::command]
+async fn validate_api_key(
+    key: String,
+    state: State<'_, SafeAppState>,
+) -> Result<Value, String> {
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return Ok(json!({ "valid": false, "error": "empty_key" }));
+    }
+    if !key.starts_with("sk-ant-") {
+        return Ok(json!({ "valid": false, "error": "Expected key to start with sk-ant-" }));
+    }
+
+    let client = reqwest::Client::new();
+    let body = json!({
+        "model": STRATEGY_MODEL,
+        "max_tokens": 1,
+        "messages": [{ "role": "user", "content": "ok" }]
+    });
+
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await;
+
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => return Ok(json!({ "valid": false, "error": format!("Network error: {}", e) })),
+    };
+
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap_or(json!({}));
+
+    if status.is_success() {
+        if let Some(usage) = body.get("usage") {
+            let app_state = state.inner().clone();
+            record_usage(&app_state, usage);
+        }
+        Ok(json!({
+            "valid": true,
+            "model": STRATEGY_MODEL,
+        }))
+    } else {
+        let err_msg = body["error"]["message"]
+            .as_str()
+            .unwrap_or("Validation failed")
+            .to_string();
+        Ok(json!({
+            "valid": false,
+            "error": err_msg,
+            "status": status.as_u16(),
+        }))
+    }
 }
 
 #[tauri::command]
@@ -229,8 +620,8 @@ fn get_lookups() -> Value {
             "3":"Light Rain","4":"Heavy Rain","5":"Storm"
         },
         "TEAM_COLORS": {
-            "0":"#00D2BE","1":"#DC0000","2":"#3671C6","3":"#37BEDD",
-            "4":"#358C75","5":"#FF87BC","6":"#5E8FAA","7":"#B6BABD",
+            "0":"#27F4D2","1":"#E80020","2":"#3671C6","3":"#64C4FF",
+            "4":"#229971","5":"#0093CC","6":"#6692FF","7":"#B6BABD",
             "8":"#FF8000","9":"#52E252","41":"#3671C6","253":"#FFFFFF"
         },
         "TYRE_COMPOUNDS": {
@@ -602,9 +993,11 @@ fn chrono_now() -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let mut slots: HashMap<String, SharedState> = HashMap::new();
+    slots.insert(PRIMARY_SLOT.to_string(), Arc::new(Mutex::new(TelemetryState::default())));
     let app_state: SafeAppState = Arc::new(Mutex::new(AppState {
-        telemetry: Arc::new(Mutex::new(TelemetryState::default())),
-        telemetry_handle: None,
+        slots,
+        handles: HashMap::new(),
         api_key: None,
         premium: false,
         usage_input_tokens: 0,
@@ -620,14 +1013,47 @@ pub fn run() {
         .plugin(tauri_plugin_log::Builder::default()
             .level(log::LevelFilter::Info)
             .build())
+        .on_window_event(|window, event| {
+            // When the main window is closed, tear down all spawned child
+            // windows (driver-*, page-*, overlay) so the app exits cleanly.
+            if window.label() == "main" {
+                if matches!(event, tauri::WindowEvent::CloseRequested { .. }
+                                 | tauri::WindowEvent::Destroyed)
+                {
+                    let app = window.app_handle().clone();
+                    for (label, w) in app.webview_windows() {
+                        if label != "main" {
+                            let _ = w.close();
+                        }
+                    }
+                }
+            }
+        })
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             start_telemetry,
             stop_telemetry,
+            list_telemetry_slots,
+            open_driver_window,
+            open_page_window,
+            open_overlay_window,
+            start_track_trace,
+            stop_track_trace,
+            save_track_trace,
+            load_track_trace,
+            list_track_traces,
+            load_tt_track,
+            set_lan_relay,
             set_manual_track,
+            start_track_trace,
+            stop_track_trace,
+            save_track_trace,
+            load_track_trace,
+            list_track_traces,
             set_api_key,
             set_premium,
             get_premium,
+            validate_api_key,
             get_usage,
             reset_usage,
             load_settings,

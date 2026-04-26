@@ -1,23 +1,63 @@
 /**
- * Tauri API bridge — replaces window.raceEngineer (Electron contextBridge).
- *
- * All methods mirror the old preload.js API exactly so existing hooks/components
- * need minimal changes. Import this module instead of using `window.raceEngineer`.
+ * Tauri API bridge. Events for the "primary" slot are legacy-unsuffixed;
+ * events for additional slots are suffixed `::<slot>`. Use the `*For(slot)`
+ * listener helpers when binding to a non-primary slot.
  */
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-// ── Commands ──────────────────────────────────────────────────────────────────
+export const PRIMARY_SLOT = 'primary';
+
+export function eventName(base: string, slot: string): string {
+  return slot === PRIMARY_SLOT ? base : `${base}::${slot}`;
+}
 
 export const api = {
-  startTelemetry: (port?: number) =>
-    invoke<{ success: boolean; port: number }>('start_telemetry', { port }),
+  startTelemetry: (port?: number, slot?: string) =>
+    invoke<{ success: boolean; port: number; slot: string }>('start_telemetry', { port, slot }),
 
-  stopTelemetry: () =>
-    invoke<{ success: boolean }>('stop_telemetry'),
+  stopTelemetry: (slot?: string) =>
+    invoke<{ success: boolean; slot: string }>('stop_telemetry', { slot }),
 
-  setManualTrack: (trackId: number) =>
-    invoke<void>('set_manual_track', { trackId }),
+  listTelemetrySlots: () =>
+    invoke<{ slots: { slot: string; port: number }[] }>('list_telemetry_slots'),
+
+  openDriverWindow: (slot: string) =>
+    invoke<{ success: boolean; reused: boolean; label?: string }>('open_driver_window', { slot }),
+
+  openPageWindow: (page: string, slot?: string) =>
+    invoke<{ success: boolean; reused: boolean; label?: string }>('open_page_window', { page, slot }),
+
+  openOverlayWindow: (slot?: string) =>
+    invoke<{ success: boolean; reused?: boolean }>('open_overlay_window', { slot }),
+
+  setLanRelay: (payload: { slot?: string; host?: string; port?: number }) =>
+    invoke<{ success: boolean; slot: string; relay?: string }>('set_lan_relay', payload),
+
+  setManualTrack: (trackId: number, slot?: string) =>
+    invoke<void>('set_manual_track', { trackId, slot }),
+
+  // ── Track-trace recording ────────────────────────────────────────────────
+  startTrackTrace: (slot?: string) =>
+    invoke<{ success: boolean; trackId?: number; error?: string }>(
+      'start_track_trace', { slot }),
+
+  stopTrackTrace: (slot?: string) =>
+    invoke<{ success: boolean }>('stop_track_trace', { slot }),
+
+  saveTrackTrace: (trackId: number, samples: [number, number][]) =>
+    invoke<{ success: boolean; path?: string; error?: string }>(
+      'save_track_trace', { trackId, samples }),
+
+  loadTrackTrace: (trackId: number) =>
+    invoke<TrackTrace | null>('load_track_trace', { trackId }),
+
+  listTrackTraces: () =>
+    invoke<number[]>('list_track_traces'),
+
+  // ── Team Telemetry 25 BYO-data import ──────────────────────────────────
+  loadTtTrack: (trackId: number, ttPath: string) =>
+    invoke<TtTrackData>('load_tt_track', { trackId, ttPath }),
 
   setApiKey: (key: string) =>
     invoke<void>('set_api_key', { key }),
@@ -27,6 +67,11 @@ export const api = {
 
   getPremium: () =>
     invoke<{ premium: boolean; hasApiKey: boolean }>('get_premium'),
+
+  validateApiKey: (key: string) =>
+    invoke<{ valid: boolean; error?: string; model?: string; status?: number }>(
+      'validate_api_key', { key },
+    ),
 
   getUsage: () =>
     invoke<{
@@ -68,14 +113,35 @@ export const api = {
     invoke<string>('tts_speak', { payload }),
 };
 
-// ── Shared types ─────────────────────────────────────────────────────────────
-
 export type StrategyAction =
   | 'pit_now' | 'pit_next_lap' | 'pit_in_n_laps' | 'stay_out'
   | 'push' | 'save_tyres' | 'save_fuel' | 'manage_ers'
   | 'defend' | 'attack_undercut' | 'attack_overcut' | 'hold_position';
 
 export type StrategyCompound = 'soft' | 'medium' | 'hard' | 'inter' | 'wet' | null;
+
+/** One car's live world position (from the Motion packet). */
+export interface MotionPoint { x: number; y: number; z: number; }
+export type MotionUpdate = MotionPoint[];
+
+export interface TrackTrace {
+  trackId: number;
+  samples: [number, number][];            // [worldX, worldZ] pairs
+  bbox: { minX: number; maxX: number; minZ: number; maxZ: number };
+  recordedAt?: string;
+}
+
+/** Parsed TT data for a single track. `found:false` when the CSVs aren't
+ *  present at the configured path (renderer should fall back). */
+export interface TtTrackData {
+  found: boolean;
+  trackId: number;
+  racingLine?: [number, number][];
+  pitLane?: [number, number][];
+  settings?: Record<string, number | string | boolean> | null;
+  bbox?: { minX: number; maxX: number; minZ: number; maxZ: number };
+  pathLength?: number;
+}
 
 export interface StrategyDecision {
   action: StrategyAction;
@@ -89,54 +155,49 @@ export interface StrategyDecision {
   triggerConditions?: string[];
 }
 
-// ── Event listeners ───────────────────────────────────────────────────────────
-// Each returns an UnlistenFn — call it to remove the listener.
+// ── Event listeners (slot-aware) ──────────────────────────────────────────────
+// `onFoo(cb)` binds to the primary slot. `onFooFor(slot, cb)` targets another.
 
-export function onTelemetryStarted(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('telemetry-started', (e) => cb(e.payload));
+function bind<T>(base: string, slot: string, cb: (d: T) => void) {
+  return listen<T>(eventName(base, slot), (e) => cb(e.payload));
 }
-export function onTelemetryStopped(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('telemetry-stopped', (e) => cb(e.payload));
-}
-export function onTelemetryError(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('telemetry-error', (e) => cb(e.payload));
-}
-export function onSessionUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('session-update', (e) => cb(e.payload));
-}
-export function onLapUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('lap-update', (e) => cb(e.payload));
-}
-export function onTelemetryUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('telemetry-update', (e) => cb(e.payload));
-}
-export function onAllTelemetryUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('alltelemetry-update', (e) => cb(e.payload));
-}
-export function onStatusUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('status-update', (e) => cb(e.payload));
-}
-export function onAllStatusUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('allstatus-update', (e) => cb(e.payload));
-}
-export function onDamageUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('damage-update', (e) => cb(e.payload));
-}
-export function onSetupUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('setup-update', (e) => cb(e.payload));
-}
-export function onAllSetupUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('allsetup-update', (e) => cb(e.payload));
-}
-export function onParticipantsUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('participants-update', (e) => cb(e.payload));
-}
-export function onBestLapsUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('best-laps-update', (e) => cb(e.payload));
-}
-export function onFastestLapUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('fastest-lap-update', (e) => cb(e.payload));
-}
-export function onEventUpdate(cb: (data: any) => void): Promise<UnlistenFn> {
-  return listen('event-update', (e) => cb(e.payload));
-}
+
+export const onTelemetryStarted   = (cb: (d: any) => void) => bind<any>('telemetry-started', PRIMARY_SLOT, cb);
+export const onTelemetryStopped   = (cb: (d: any) => void) => bind<any>('telemetry-stopped', PRIMARY_SLOT, cb);
+export const onTelemetryError     = (cb: (d: any) => void) => bind<any>('telemetry-error', PRIMARY_SLOT, cb);
+export const onSessionUpdate      = (cb: (d: any) => void) => bind<any>('session-update', PRIMARY_SLOT, cb);
+export const onLapUpdate          = (cb: (d: any) => void) => bind<any>('lap-update', PRIMARY_SLOT, cb);
+export const onTelemetryUpdate    = (cb: (d: any) => void) => bind<any>('telemetry-update', PRIMARY_SLOT, cb);
+export const onAllTelemetryUpdate = (cb: (d: any) => void) => bind<any>('alltelemetry-update', PRIMARY_SLOT, cb);
+export const onStatusUpdate       = (cb: (d: any) => void) => bind<any>('status-update', PRIMARY_SLOT, cb);
+export const onAllStatusUpdate    = (cb: (d: any) => void) => bind<any>('allstatus-update', PRIMARY_SLOT, cb);
+export const onDamageUpdate       = (cb: (d: any) => void) => bind<any>('damage-update', PRIMARY_SLOT, cb);
+export const onSetupUpdate        = (cb: (d: any) => void) => bind<any>('setup-update', PRIMARY_SLOT, cb);
+export const onAllSetupUpdate     = (cb: (d: any) => void) => bind<any>('allsetup-update', PRIMARY_SLOT, cb);
+export const onParticipantsUpdate = (cb: (d: any) => void) => bind<any>('participants-update', PRIMARY_SLOT, cb);
+export const onBestLapsUpdate     = (cb: (d: any) => void) => bind<any>('best-laps-update', PRIMARY_SLOT, cb);
+export const onFastestLapUpdate   = (cb: (d: any) => void) => bind<any>('fastest-lap-update', PRIMARY_SLOT, cb);
+export const onEventUpdate        = (cb: (d: any) => void) => bind<any>('event-update', PRIMARY_SLOT, cb);
+export const onDriverHistoryUpdate= (cb: (d: any) => void) => bind<any>('driver-history-update', PRIMARY_SLOT, cb);
+
+// Slot-scoped variants — same callbacks, different event suffix.
+export const onTelemetryStartedFor   = (slot: string, cb: (d: any) => void) => bind<any>('telemetry-started', slot, cb);
+export const onTelemetryStoppedFor   = (slot: string, cb: (d: any) => void) => bind<any>('telemetry-stopped', slot, cb);
+export const onTelemetryErrorFor     = (slot: string, cb: (d: any) => void) => bind<any>('telemetry-error', slot, cb);
+export const onSessionUpdateFor      = (slot: string, cb: (d: any) => void) => bind<any>('session-update', slot, cb);
+export const onLapUpdateFor          = (slot: string, cb: (d: any) => void) => bind<any>('lap-update', slot, cb);
+export const onTelemetryUpdateFor    = (slot: string, cb: (d: any) => void) => bind<any>('telemetry-update', slot, cb);
+export const onAllTelemetryUpdateFor = (slot: string, cb: (d: any) => void) => bind<any>('alltelemetry-update', slot, cb);
+export const onStatusUpdateFor       = (slot: string, cb: (d: any) => void) => bind<any>('status-update', slot, cb);
+export const onAllStatusUpdateFor    = (slot: string, cb: (d: any) => void) => bind<any>('allstatus-update', slot, cb);
+export const onDamageUpdateFor       = (slot: string, cb: (d: any) => void) => bind<any>('damage-update', slot, cb);
+export const onSetupUpdateFor        = (slot: string, cb: (d: any) => void) => bind<any>('setup-update', slot, cb);
+export const onAllSetupUpdateFor     = (slot: string, cb: (d: any) => void) => bind<any>('allsetup-update', slot, cb);
+export const onParticipantsUpdateFor = (slot: string, cb: (d: any) => void) => bind<any>('participants-update', slot, cb);
+export const onBestLapsUpdateFor     = (slot: string, cb: (d: any) => void) => bind<any>('best-laps-update', slot, cb);
+export const onFastestLapUpdateFor   = (slot: string, cb: (d: any) => void) => bind<any>('fastest-lap-update', slot, cb);
+export const onEventUpdateFor        = (slot: string, cb: (d: any) => void) => bind<any>('event-update', slot, cb);
+export const onDriverHistoryUpdateFor= (slot: string, cb: (d: any) => void) => bind<any>('driver-history-update', slot, cb);
+export const onMotionUpdateFor        = (slot: string, cb: (d: MotionUpdate) => void) => bind<MotionUpdate>('motion-update', slot, cb);
+export const onTrackTraceCompleteFor  = (slot: string, cb: (d: { trackId: number; samples: [number, number][] }) => void) =>
+  bind<{ trackId: number; samples: [number, number][] }>('track-trace-complete', slot, cb);

@@ -214,10 +214,28 @@ export interface LapData {
   sector: number;
   currentLapInvalid: number;
   penalties: number;
+  totalWarnings?: number;
+  cornerCuttingWarnings?: number;
+  numUnservedDriveThroughPens?: number;
+  numUnservedStopGoPens?: number;
   gridPosition: number;
   driverStatus: DriverStatus;
   resultStatus: ResultStatus;
   pitLaneTimerActive: number;
+}
+
+export interface HistoryLap {
+  lapNumber: number;
+  lapTimeMs: number;
+  sector1TimeMs: number;
+  sector2TimeMs: number;
+  sector3TimeMs: number;
+  validFlags: number;
+}
+
+export interface DriverHistoryUpdate {
+  carIdx: number;
+  laps: HistoryLap[];
 }
 
 export interface CarTelemetry {

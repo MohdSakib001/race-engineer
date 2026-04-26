@@ -7,6 +7,7 @@ import type {
   CarSetup,
   Participant,
   EventData,
+  HistoryLap,
   TyreArray,
 } from './packets';
 
@@ -29,6 +30,12 @@ export interface TelemetryState {
   fastestLapCar: number | null;
   fastestLapMs: number | null;
   events: EventData[];
+  /** Per-driver lap history from Session History packets (carIdx → laps[]). */
+  driverHistories: Record<number, HistoryLap[]>;
+  /** Manually selected rival carIndex for comparison pages. */
+  rivalCarIndex: number | null;
+  /** Live world-position snapshot per car (from the Motion packet). */
+  motion: Array<{ x: number; y: number; z: number }>;
 }
 
 // ── Wear Prediction ──
@@ -135,11 +142,21 @@ export interface PenaltyTracker {
 }
 
 // ── Settings ──
+export interface DriverNameMask {
+  pattern: string;  // regex source
+  replace: string;
+}
+
 export interface AppSettings {
   apiKey: string;
   ttsEnabled: boolean;
   ttsVoice: string;
   ttsRate: number;
   telemetryPort: number;
+  telemetryPorts?: number[];             // Phase 4: multi-driver listen ports
   radioConfig: Record<string, boolean>;
+  driverNameMasks?: DriverNameMask[];    // Phase 1: clean up online usernames
+  showSessionTimer?: boolean;
+  rivalCarIndex?: number | null;
+  streamOverlay?: { enabled: boolean; opacity: number };
 }

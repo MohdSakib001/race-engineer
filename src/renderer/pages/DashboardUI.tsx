@@ -16,6 +16,8 @@
 
 import React, { useMemo } from 'react';
 import { useTelemetryContext } from '../context/TelemetryContext';
+import { LaunchGuide } from '../components/LaunchGuide';
+import { RadioMessages } from '../components/RadioMessages';
 import type { TyreArray, CarDamage } from '../../shared/types/packets';
 import type { WearPrediction, ErsAnalysis } from '../../shared/types/store';
 import { ErsRecommendation } from '../../shared/types/store';
@@ -468,6 +470,8 @@ export function Dashboard() {
 
   return (
     <div className="dashboard">
+      <LaunchGuide />
+
       {/* Row 1: Hero + Pedals */}
       <div className="dashboard-row hero-row">
         <SpeedHero
@@ -549,6 +553,8 @@ export function Dashboard() {
             </div>
           </div>
         )}
+
+        <RadioMessages />
       </div>
     </div>
   );

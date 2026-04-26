@@ -8,26 +8,33 @@ import type {
   CarSetup,
   Participant,
   EventData,
+  DriverHistoryUpdate,
+  HistoryLap,
 } from '../../shared/types/packets';
 import type { TelemetryState } from '../../shared/types/store';
 import {
+  PRIMARY_SLOT,
+  onTelemetryStartedFor,
+  onTelemetryStoppedFor,
+  onTelemetryErrorFor,
+  onSessionUpdateFor,
+  onLapUpdateFor,
+  onTelemetryUpdateFor,
+  onAllTelemetryUpdateFor,
+  onStatusUpdateFor,
+  onAllStatusUpdateFor,
+  onDamageUpdateFor,
+  onSetupUpdateFor,
+  onAllSetupUpdateFor,
+  onParticipantsUpdateFor,
+  onBestLapsUpdateFor,
+  onFastestLapUpdateFor,
+  onEventUpdateFor,
+  onDriverHistoryUpdateFor,
+  onMotionUpdateFor,
+  onTrackTraceCompleteFor,
   api,
-  onTelemetryStarted,
-  onTelemetryStopped,
-  onTelemetryError,
-  onSessionUpdate,
-  onLapUpdate,
-  onTelemetryUpdate,
-  onAllTelemetryUpdate,
-  onStatusUpdate,
-  onAllStatusUpdate,
-  onDamageUpdate,
-  onSetupUpdate,
-  onAllSetupUpdate,
-  onParticipantsUpdate,
-  onBestLapsUpdate,
-  onFastestLapUpdate,
-  onEventUpdate,
+  type MotionUpdate,
 } from '../lib/tauri-api';
 
 function createInitialState(): TelemetryState {
@@ -49,70 +56,86 @@ function createInitialState(): TelemetryState {
     fastestLapCar: null,
     fastestLapMs: null,
     events: [],
+    driverHistories: {},
+    rivalCarIndex: null,
+    motion: [],
   };
 }
 
-export function useTelemetry() {
+export function useTelemetry(slot: string = PRIMARY_SLOT) {
   const [state, setState] = useState<TelemetryState>(createInitialState);
 
   useEffect(() => {
-    // Register all Tauri event listeners. Each returns a promise<UnlistenFn>.
     const unlisteners: Array<() => void> = [];
     let active = true;
 
     const register = async () => {
       const fns = await Promise.all([
-        onTelemetryStarted(() =>
-          setState((s) => ({ ...s, connected: true }))),
+        onTelemetryStartedFor(slot, () => setState((s) => ({ ...s, connected: true }))),
+        onTelemetryStoppedFor(slot, () => setState((s) => ({ ...s, connected: false }))),
+        onTelemetryErrorFor(slot, () => setState((s) => ({ ...s, connected: false }))),
 
-        onTelemetryStopped(() =>
-          setState((s) => ({ ...s, connected: false }))),
-
-        onTelemetryError(() =>
-          setState((s) => ({ ...s, connected: false }))),
-
-        onSessionUpdate((data: SessionData) =>
+        onSessionUpdateFor(slot, (data: SessionData) =>
           setState((s) => ({ ...s, session: data, playerCarIndex: data.playerCarIndex ?? s.playerCarIndex }))),
 
-        onLapUpdate((data: { lapData: LapData[]; playerCarIndex: number }) =>
+        onLapUpdateFor(slot, (data: { lapData: LapData[]; playerCarIndex: number }) =>
           setState((s) => ({ ...s, lapData: data.lapData ?? [], playerCarIndex: data.playerCarIndex ?? s.playerCarIndex }))),
 
-        onTelemetryUpdate((data: CarTelemetry) =>
+        onTelemetryUpdateFor(slot, (data: CarTelemetry) =>
           setState((s) => ({ ...s, telemetry: data }))),
 
-        onAllTelemetryUpdate((data: CarTelemetry[]) =>
+        onAllTelemetryUpdateFor(slot, (data: CarTelemetry[]) =>
           setState((s) => ({ ...s, allCarTelemetry: data ?? [] }))),
 
-        onStatusUpdate((data: CarStatus) =>
+        onStatusUpdateFor(slot, (data: CarStatus) =>
           setState((s) => ({ ...s, status: data }))),
 
-        onAllStatusUpdate((data: CarStatus[]) =>
+        onAllStatusUpdateFor(slot, (data: CarStatus[]) =>
           setState((s) => ({ ...s, allCarStatus: data ?? [] }))),
 
-        onDamageUpdate((data: CarDamage) =>
+        onDamageUpdateFor(slot, (data: CarDamage) =>
           setState((s) => ({ ...s, damage: data }))),
 
-        onSetupUpdate((data: CarSetup) =>
+        onSetupUpdateFor(slot, (data: CarSetup) =>
           setState((s) => ({ ...s, setup: data }))),
 
-        onAllSetupUpdate((data: CarSetup[]) =>
+        onAllSetupUpdateFor(slot, (data: CarSetup[]) =>
           setState((s) => ({ ...s, allCarSetup: data ?? [] }))),
 
-        onParticipantsUpdate((data: { numActiveCars: number; participants: Participant[] }) =>
+        onParticipantsUpdateFor(slot, (data: { numActiveCars: number; participants: Participant[] }) =>
           setState((s) => ({ ...s, participants: data }))),
 
-        onBestLapsUpdate((data: Record<string, number>) => {
-          // Rust emits string keys; convert to number keys
+        onBestLapsUpdateFor(slot, (data: Record<string, number>) => {
           const numKeyed: Record<number, number> = {};
           for (const [k, v] of Object.entries(data)) numKeyed[Number(k)] = v;
           setState((s) => ({ ...s, bestLapTimes: { ...s.bestLapTimes, ...numKeyed } }));
         }),
 
-        onFastestLapUpdate((data: { vehicleIdx: number; lapTimeMs: number }) =>
+        onFastestLapUpdateFor(slot, (data: { vehicleIdx: number; lapTimeMs: number }) =>
           setState((s) => ({ ...s, fastestLapCar: data.vehicleIdx, fastestLapMs: data.lapTimeMs }))),
 
-        onEventUpdate((data: EventData) =>
+        onEventUpdateFor(slot, (data: EventData) =>
           setState((s) => ({ ...s, events: [...s.events.slice(-99), data] }))),
+
+        onDriverHistoryUpdateFor(slot, (data: DriverHistoryUpdate) =>
+          setState((s) => ({
+            ...s,
+            driverHistories: {
+              ...s.driverHistories,
+              [data.carIdx]: (data.laps ?? []) as HistoryLap[],
+            },
+          }))),
+
+        onMotionUpdateFor(slot, (data: MotionUpdate) =>
+          setState((s) => ({ ...s, motion: data ?? [] }))),
+
+        // When the Rust recorder finishes a lap of trace samples, persist
+        // them to disk. Fire-and-forget; errors only surface to the log.
+        onTrackTraceCompleteFor(slot, (data) => {
+          if (!data || !data.samples || data.samples.length === 0) return;
+          api.saveTrackTrace(data.trackId, data.samples)
+            .catch((e) => console.error('saveTrackTrace:', e));
+        }),
       ]);
 
       if (active) unlisteners.push(...fns);
@@ -125,15 +148,23 @@ export function useTelemetry() {
       active = false;
       unlisteners.forEach((fn) => fn());
     };
-  }, []);
+  }, [slot]);
 
   const startTelemetry = useCallback(async (port: number) => {
-    try { await api.startTelemetry(port); } catch (e) { console.error('startTelemetry:', e); }
-  }, []);
+    try { await api.startTelemetry(port, slot); } catch (e) { console.error('startTelemetry:', e); }
+  }, [slot]);
 
   const stopTelemetry = useCallback(async () => {
-    try { await api.stopTelemetry(); } catch (e) { console.error('stopTelemetry:', e); }
+    try { await api.stopTelemetry(slot); } catch (e) { console.error('stopTelemetry:', e); }
+  }, [slot]);
+
+  const setRival = useCallback((idx: number | null) => {
+    setState((s) => ({ ...s, rivalCarIndex: idx }));
   }, []);
 
-  return { ...state, startTelemetry, stopTelemetry };
+  useEffect(() => {
+    setState((s) => ({ ...s, driverHistories: {}, rivalCarIndex: null }));
+  }, [state.session?.trackId, state.session?.sessionType]);
+
+  return { ...state, startTelemetry, stopTelemetry, setRival };
 }

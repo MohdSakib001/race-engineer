@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useTelemetryContext } from '../context/TelemetryContext';
+import { TyreLifeEstimator } from '../components/TyreLifeEstimator';
 import type { CarDamage, TyreArray } from '../../shared/types/packets';
 
 const MAX_ERS = 4_000_000;
@@ -195,6 +196,8 @@ export function VehicleStatus() {
                 <StatItem label="MGU-K Power" value={`${(status.enginePowerMGUK / 1000).toFixed(0)} kW`} />
               </div>
             </div>
+
+            <TyreLifeEstimator />
 
             {damage && (
               <>

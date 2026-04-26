@@ -10,6 +10,7 @@ const DAMAGE_SIZE: usize = 46;
 const SETUP_SIZE: usize = 50;
 const PARTICIPANT_SIZE: usize = 57;
 const LAP_HISTORY_SIZE: usize = 14;
+const MOTION_SIZE: usize = 60;
 
 // ── Read helpers ───────────────────────────────────────────────────────────────
 #[inline] fn ru8(d: &[u8], o: usize) -> u8 { d.get(o).copied().unwrap_or(0) }
@@ -45,6 +46,26 @@ pub fn parse_header(d: &[u8]) -> Option<Header> {
         packet_id: ru8(d, 6),
         player_car_index: ru8(d, 27),
     })
+}
+
+// ── Motion (packet id 0) ──────────────────────────────────────────────────────
+// Each car entry is 60 bytes: worldPos XYZ (12), worldVel XYZ (12), world
+// forward/right dirs as int16 (12), lateral/long/vertical G (12), yaw/pitch/
+// roll as f32 (12). We only need XYZ position for the track map, so we
+// extract just that and drop the rest.
+pub fn parse_motion(d: &[u8]) -> Option<Value> {
+    let h = HEADER_SIZE;
+    let mut cars = Vec::with_capacity(MAX_CARS);
+    for i in 0..MAX_CARS {
+        let o = h + i * MOTION_SIZE;
+        if o + 12 > d.len() { break; }
+        cars.push(json!({
+            "x": rf32(d, o),
+            "y": rf32(d, o + 4),
+            "z": rf32(d, o + 8),
+        }));
+    }
+    if cars.is_empty() { None } else { Some(Value::Array(cars)) }
 }
 
 // ── Session (packet id 1) ─────────────────────────────────────────────────────
@@ -125,8 +146,12 @@ pub fn parse_lap_data(d: &[u8]) -> Option<Value> {
             "numPitStops":        ru8(d, o + 35),
             "sector":             ru8(d, o + 36),
             "currentLapInvalid":  ru8(d, o + 37),
-            "penalties":          ru8(d, o + 38),
-            "gridPosition":       ru8(d, o + 43),
+            "penalties":               ru8(d, o + 38),
+            "totalWarnings":          ru8(d, o + 39),
+            "cornerCuttingWarnings":  ru8(d, o + 40),
+            "numUnservedDriveThroughPens": ru8(d, o + 41),
+            "numUnservedStopGoPens":  ru8(d, o + 42),
+            "gridPosition":           ru8(d, o + 43),
             "driverStatus":       ru8(d, o + 44),
             "resultStatus":       ru8(d, o + 45),
             "pitLaneTimerActive": ru8(d, o + 46),
@@ -322,6 +347,31 @@ pub fn parse_event(d: &[u8]) -> Option<Value> {
             "overtakingVehicleIdx": ru8(d, h + 4),
             "beingOvertakenVehicleIdx": ru8(d, h + 5),
         })),
+        "PENA" => Some(json!({
+            "type": "PENA",
+            "penaltyType":     ru8(d, h + 4),
+            "infringementType":ru8(d, h + 5),
+            "vehicleIdx":      ru8(d, h + 6),
+            "otherVehicleIdx": ru8(d, h + 7),
+            "time":            ru8(d, h + 8),
+            "lapNum":          ru8(d, h + 9),
+            "placesGained":    ru8(d, h + 10),
+        })),
+        "RCMG" => Some(json!({
+            "type": "RCMG",
+            "vehicleIdx": ru8(d, h + 4),
+            "flagType":   ru8(d, h + 5),
+        })),
+        "STLG" => Some(json!({
+            "type": "STLG",
+            "numLights": ru8(d, h + 4),
+        })),
+        "LGOT" => Some(json!({ "type": "LGOT" })),
+        "CHQF" => Some(json!({ "type": "CHQF" })),
+        "DRSE" => Some(json!({ "type": "DRSE" })),
+        "DRSD" => Some(json!({ "type": "DRSD" })),
+        "SSTA" => Some(json!({ "type": "SSTA" })),
+        "SEND" => Some(json!({ "type": "SEND" })),
         c => Some(json!({ "type": c })),
     }
 }
@@ -330,6 +380,7 @@ pub fn parse_event(d: &[u8]) -> Option<Value> {
 pub struct SessionHistory {
     pub car_idx: usize,
     pub best_lap_time_ms: u32,
+    pub laps: Value, // array of lap entries
 }
 
 pub fn parse_session_history(d: &[u8]) -> Option<SessionHistory> {
@@ -340,11 +391,36 @@ pub fn parse_session_history(d: &[u8]) -> Option<SessionHistory> {
     let best_lap_num = ru8(d, h + 3) as usize;
     let laps_start = h + 7;
     let mut best_ms = 0u32;
+    let mut laps_arr: Vec<Value> = Vec::with_capacity(num_laps);
+    for i in 0..num_laps.min(100) {
+        let lap_off = laps_start + i * LAP_HISTORY_SIZE;
+        if lap_off + LAP_HISTORY_SIZE > d.len() { break; }
+        let lt = ru32(d, lap_off);
+        let s1_ms = ru16(d, lap_off + 4) as u32;
+        let s1_mins = ru8(d, lap_off + 6) as u32;
+        let s2_ms = ru16(d, lap_off + 7) as u32;
+        let s2_mins = ru8(d, lap_off + 9) as u32;
+        let s3_ms = ru16(d, lap_off + 10) as u32;
+        let s3_mins = ru8(d, lap_off + 12) as u32;
+        let flags = ru8(d, lap_off + 13);
+        laps_arr.push(json!({
+            "lapNumber":    i + 1,
+            "lapTimeMs":    lt,
+            "sector1TimeMs": s1_ms + s1_mins * 60_000,
+            "sector2TimeMs": s2_ms + s2_mins * 60_000,
+            "sector3TimeMs": s3_ms + s3_mins * 60_000,
+            "validFlags":   flags, // bit0=valid lap, 1=s1 valid, 2=s2 valid, 3=s3 valid
+        }));
+    }
     if best_lap_num > 0 && best_lap_num <= num_laps {
         let lap_off = laps_start + (best_lap_num - 1) * LAP_HISTORY_SIZE;
         if lap_off + 4 <= d.len() {
             best_ms = ru32(d, lap_off);
         }
     }
-    Some(SessionHistory { car_idx, best_lap_time_ms: best_ms })
+    Some(SessionHistory {
+        car_idx,
+        best_lap_time_ms: best_ms,
+        laps: Value::Array(laps_arr),
+    })
 }

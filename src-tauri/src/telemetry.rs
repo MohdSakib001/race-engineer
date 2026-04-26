@@ -1,4 +1,4 @@
-/// UDP telemetry runtime — ported from src/main/telemetry-runtime.js
+/// UDP telemetry runtime — supports multiple slots (one UDP listener per driver).
 use crate::parser::{self, HEADER_SIZE};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -8,6 +8,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 
 pub const DEFAULT_PORT: u16 = 20777;
+pub const PRIMARY_SLOT: &str = "primary";
 
 #[derive(Debug, Clone, Default)]
 pub struct TelemetryState {
@@ -23,16 +24,44 @@ pub struct TelemetryState {
     pub best_lap_times: HashMap<usize, u32>,
     pub fastest_lap: Option<Value>,
     pub manual_track_id: Option<i8>,
+    /// Optional LAN relay destination "host:port". When set, every received
+    /// UDP packet is forwarded unchanged so another machine can observe.
+    pub lan_relay: Option<String>,
+
+    // ── Lap-trace recording (for generating accurate track maps from
+    // live game data). When `recording_track` is Some, the Motion handler
+    // samples the player's (x, z) world position each tick and appends it
+    // to `recording_samples`. On next lap-start the trace is saved to
+    // disk keyed by trackId and recording stops.
+    pub recording_track: Option<i8>,
+    pub recording_samples: Vec<(f32, f32)>,
+    pub recording_last_lap_distance: f32,
+    pub recording_started_at_lap: bool,
+    pub current_track_id: Option<i8>,
 }
 
 pub type SharedState = Arc<Mutex<TelemetryState>>;
 
-/// Handle to a running UDP listener — drop to cancel.
+/// Handle to a running UDP listener — drop or send shutdown to cancel.
 pub struct TelemetryHandle {
     pub shutdown: oneshot::Sender<()>,
+    pub port: u16,
+}
+
+/// Scope: name of the slot this listener is for. "primary" slot uses
+/// legacy (unsuffixed) event names for backward compatibility; other slots
+/// emit `<event>::<slot>` instead.
+fn emit_for(app: &AppHandle, slot: &str, event: &str, payload: impl serde::Serialize + Clone) {
+    if slot == PRIMARY_SLOT {
+        let _ = app.emit(event, payload);
+    } else {
+        let name = format!("{}::{}", event, slot);
+        let _ = app.emit(&name, payload);
+    }
 }
 
 pub async fn start_udp_listener(
+    slot: String,
     port: u16,
     state: SharedState,
     app: AppHandle,
@@ -40,17 +69,16 @@ pub async fn start_udp_listener(
     let addr = format!("0.0.0.0:{}", port);
     let socket = UdpSocket::bind(&addr)
         .await
-        .map_err(|e| format!("Cannot bind UDP port {}: {}", port, e))?;
+        .map_err(|e| format!("Cannot bind UDP port {} (slot {}): {}", port, slot, e))?;
 
-    log::info!("Telemetry listening on UDP :{}", port);
+    log::info!("Telemetry slot={} listening on UDP :{}", slot, port);
 
     let (tx, mut rx) = oneshot::channel::<()>();
-
-    // Send started event immediately
-    let _ = app.emit("telemetry-started", json!({ "port": port }));
+    emit_for(&app, &slot, "telemetry-started", json!({ "port": port, "slot": &slot }));
 
     let state_clone = state.clone();
     let app_clone = app.clone();
+    let slot_clone = slot.clone();
 
     tokio::spawn(async move {
         let mut buf = vec![0u8; 4096];
@@ -61,66 +89,142 @@ pub async fn start_udp_listener(
                     let n = match result {
                         Ok(n) => n,
                         Err(e) => {
-                            log::error!("UDP recv error: {}", e);
-                            let _ = app_clone.emit("telemetry-error", json!({ "message": e.to_string() }));
+                            log::error!("UDP recv error on slot {}: {}", slot_clone, e);
+                            emit_for(&app_clone, &slot_clone, "telemetry-error",
+                                json!({ "message": e.to_string(), "slot": &slot_clone }));
                             break;
                         }
                     };
                     if n < HEADER_SIZE { continue; }
                     let packet = &buf[..n];
+
+                    // Optional LAN relay — forward the raw bytes unchanged.
+                    let relay = state_clone.lock().ok()
+                        .and_then(|s| s.lan_relay.clone());
+                    if let Some(dst) = relay {
+                        if let Err(e) = socket.send_to(packet, &dst).await {
+                            log::warn!("relay send_to {} failed: {}", dst, e);
+                        }
+                    }
+
                     if let Some(header) = parser::parse_header(packet) {
-                        handle_packet(header, packet, &state_clone, &app_clone);
+                        handle_packet(&slot_clone, header, packet, &state_clone, &app_clone);
                     }
                 }
             }
         }
-        log::info!("Telemetry UDP listener stopped on :{}", port);
+        log::info!("Telemetry slot={} stopped on :{}", slot_clone, port);
+        emit_for(&app_clone, &slot_clone, "telemetry-stopped",
+            json!({ "slot": &slot_clone }));
     });
 
-    Ok(TelemetryHandle { shutdown: tx })
+    Ok(TelemetryHandle { shutdown: tx, port })
 }
 
-fn handle_packet(header: parser::Header, data: &[u8], state: &SharedState, app: &AppHandle) {
+fn handle_packet(slot: &str, header: parser::Header, data: &[u8], state: &SharedState, app: &AppHandle) {
     let mut s = match state.lock() { Ok(s) => s, Err(_) => return };
     let idx = header.player_car_index as usize;
     if idx < parser::MAX_CARS { s.player_car_index = idx; }
 
     match header.packet_id {
+        0 => {
+            if let Some(motion) = parser::parse_motion(data) {
+                let player_idx = s.player_car_index;
+                // If a lap-trace recording is in progress for this track,
+                // append the player's (x, z) sample. Start recording once
+                // lapDistance is near 0 (fresh lap); stop after one lap.
+                if s.recording_track == s.current_track_id && s.recording_track.is_some() {
+                    let player_pos = motion.as_array()
+                        .and_then(|a| a.get(player_idx))
+                        .cloned();
+                    if let Some(p) = player_pos {
+                        let x = p["x"].as_f64().unwrap_or(0.0) as f32;
+                        let z = p["z"].as_f64().unwrap_or(0.0) as f32;
+                        if s.recording_started_at_lap {
+                            s.recording_samples.push((x, z));
+                        }
+                    }
+                }
+                drop(s);
+                emit_for(app, slot, "motion-update", motion);
+            }
+        }
         1 => {
             if let Some(mut session) = parser::parse_session(data) {
-                // Apply manual track override
                 if let Some(override_id) = s.manual_track_id {
                     session["trackId"] = json!(override_id);
                 }
-                // Clear best laps on track change
+                let track_id = session["trackId"].as_i64().map(|v| v as i8);
+                s.current_track_id = track_id;
                 if let Some(existing) = &s.session_data {
                     let changed = existing["trackId"] != session["trackId"]
                         || existing["sessionType"] != session["sessionType"];
                     if changed {
                         s.best_lap_times.clear();
                         s.fastest_lap = None;
-                        log::info!("Session changed: track={} type={}", session["trackId"], session["sessionType"]);
+                        log::info!("Slot {} session changed: track={} type={}",
+                            slot, session["trackId"], session["sessionType"]);
                     }
                 }
                 s.session_data = Some(session.clone());
                 let payload = enrich_session(&session);
                 drop(s);
-                let _ = app.emit("session-update", payload);
+                emit_for(app, slot, "session-update", payload);
             }
         }
         2 => {
             if let Some(lap) = parser::parse_lap_data(data) {
                 let player_idx = s.player_car_index;
+
+                // Lap-trace recorder lifecycle: watch the player's
+                // lapDistance. When it crosses near 0 from a high value
+                // (start of a new lap), begin recording. When it crosses
+                // near 0 a second time (lap complete), stop and emit a
+                // "track-trace-complete" event so the renderer can save
+                // the trace to disk.
+                if s.recording_track.is_some() {
+                    let player_lap = lap.as_array()
+                        .and_then(|a| a.get(player_idx))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let cur = player_lap["lapDistance"].as_f64().unwrap_or(0.0) as f32;
+                    let prev = s.recording_last_lap_distance;
+                    let lap_reset = prev > 500.0 && cur < 50.0;
+                    if !s.recording_started_at_lap && lap_reset {
+                        s.recording_started_at_lap = true;
+                        s.recording_samples.clear();
+                        log::info!("track-trace recording started on slot {}", slot);
+                    } else if s.recording_started_at_lap && lap_reset {
+                        let samples = std::mem::take(&mut s.recording_samples);
+                        let track_id = s.recording_track.take().unwrap_or(-1);
+                        s.recording_started_at_lap = false;
+                        drop(s);
+                        log::info!("track-trace recording complete: {} samples for track {}",
+                            samples.len(), track_id);
+                        let payload = json!({
+                            "trackId": track_id,
+                            "samples": samples.iter()
+                                .map(|(x, z)| json!([x, z]))
+                                .collect::<Vec<_>>(),
+                        });
+                        emit_for(app, slot, "track-trace-complete", payload);
+                        // Reacquire lock for normal emit below
+                        s = match state.lock() { Ok(s) => s, Err(_) => return };
+                    }
+                    s.recording_last_lap_distance = cur;
+                }
+
                 s.lap_data = Some(lap.clone());
                 drop(s);
-                let _ = app.emit("lap-update", json!({ "lapData": lap, "playerCarIndex": player_idx }));
+                emit_for(app, slot, "lap-update",
+                    json!({ "lapData": lap, "playerCarIndex": player_idx }));
             }
         }
         4 => {
             if let Some(participants) = parser::parse_participants(data) {
                 s.participants = Some(participants.clone());
                 drop(s);
-                let _ = app.emit("participants-update", participants);
+                emit_for(app, slot, "participants-update", participants);
             }
         }
         5 => {
@@ -139,8 +243,8 @@ fn handle_packet(header: parser::Header, data: &[u8], state: &SharedState, app: 
                     }
                     let all = Value::Array(setups.clone());
                     drop(s);
-                    let _ = app.emit("setup-update", ps);
-                    let _ = app.emit("allsetup-update", all);
+                    emit_for(app, slot, "setup-update", ps);
+                    emit_for(app, slot, "allsetup-update", all);
                 }
             }
         }
@@ -153,8 +257,8 @@ fn handle_packet(header: parser::Header, data: &[u8], state: &SharedState, app: 
                     .unwrap_or(Value::Null);
                 s.car_telemetry = Some(tel.clone());
                 drop(s);
-                let _ = app.emit("telemetry-update", player_tel);
-                let _ = app.emit("alltelemetry-update", tel);
+                emit_for(app, slot, "telemetry-update", player_tel);
+                emit_for(app, slot, "alltelemetry-update", tel);
             }
         }
         7 => {
@@ -166,8 +270,8 @@ fn handle_packet(header: parser::Header, data: &[u8], state: &SharedState, app: 
                     .unwrap_or(Value::Null);
                 s.car_status = Some(status.clone());
                 drop(s);
-                let _ = app.emit("status-update", player_status);
-                let _ = app.emit("allstatus-update", status);
+                emit_for(app, slot, "status-update", player_status);
+                emit_for(app, slot, "allstatus-update", status);
             }
         }
         3 => {
@@ -178,11 +282,11 @@ fn handle_packet(header: parser::Header, data: &[u8], state: &SharedState, app: 
                     s.fastest_lap = Some(json!({ "vehicleIdx": v_idx, "lapTimeMs": ms }));
                     let fl = s.fastest_lap.clone().unwrap();
                     drop(s);
-                    let _ = app.emit("fastest-lap-update", fl);
+                    emit_for(app, slot, "fastest-lap-update", fl);
                 } else {
                     drop(s);
                 }
-                let _ = app.emit("event-update", event);
+                emit_for(app, slot, "event-update", event);
             }
         }
         10 => {
@@ -194,27 +298,32 @@ fn handle_packet(header: parser::Header, data: &[u8], state: &SharedState, app: 
                     .unwrap_or(Value::Null);
                 s.car_damage = Some(damage);
                 drop(s);
-                let _ = app.emit("damage-update", player_dmg);
+                emit_for(app, slot, "damage-update", player_dmg);
             }
         }
         11 => {
             if let Some(hist) = parser::parse_session_history(data) {
                 if hist.best_lap_time_ms > 0 {
                     s.best_lap_times.insert(hist.car_idx, hist.best_lap_time_ms);
-                    let best_laps: HashMap<String, u32> = s.best_lap_times
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), *v))
-                        .collect();
-                    drop(s);
-                    let _ = app.emit("best-laps-update", best_laps);
                 }
+                let best_laps: HashMap<String, u32> = s.best_lap_times
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), *v))
+                    .collect();
+                let car_idx = hist.car_idx;
+                let laps = hist.laps;
+                drop(s);
+                if !best_laps.is_empty() {
+                    emit_for(app, slot, "best-laps-update", best_laps);
+                }
+                emit_for(app, slot, "driver-history-update",
+                    json!({ "carIdx": car_idx, "laps": laps }));
             }
         }
         _ => {}
     }
 }
 
-/// Attach track/session names (mirrors telemetry-runtime broadcastSession)
 fn enrich_session(session: &Value) -> Value {
     let track_id = session["trackId"].as_i64().unwrap_or(-1);
     let session_type = session["sessionType"].as_u64().unwrap_or(0);

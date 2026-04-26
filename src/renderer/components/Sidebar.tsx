@@ -1,5 +1,9 @@
 import React from 'react';
 import { useTelemetryContext } from '../context/TelemetryContext';
+import { usePrefs } from '../context/PrefsContext';
+import { SessionTimer } from './SessionTimer';
+import { DriverSwitcher } from './DriverSwitcher';
+import { api } from '../lib/tauri-api';
 import type { Page } from '../App';
 
 interface SidebarProps {
@@ -8,20 +12,28 @@ interface SidebarProps {
 }
 
 const NAV_ITEMS: { id: Page; label: string; icon: string }[] = [
-  { id: 'dashboard',   label: 'Dashboard',    icon: '\u229E' },
-  { id: 'timing',      label: 'Timing',        icon: '\u23F1' },
-  { id: 'lap-history', label: 'Lap History',   icon: '\u2630' },
-  { id: 'analysis',    label: 'Analysis',      icon: '\u25A3' },
-  { id: 'trackmap',    label: 'Track Map',     icon: '\u25CE' },
-  { id: 'vehicle',     label: 'Vehicle',       icon: '\u2B21' },
-  { id: 'session',     label: 'Session',       icon: '\u2691' },
-  { id: 'engineer',    label: 'Engineer',      icon: '\u2699' },
-  { id: 'radio',       label: 'Radio Config',  icon: '\u266B' },
-  { id: 'settings',    label: 'Settings',      icon: '\u2263' },
+  { id: 'dashboard',   label: 'Dashboard',    icon: '⊞' },
+  { id: 'timing',      label: 'Timing',        icon: '⏱' },
+  { id: 'lap-history', label: 'Lap History',   icon: '☰' },
+  { id: 'analysis',    label: 'Analysis',      icon: '▣' },
+  { id: 'trackmap',    label: 'Track Map',     icon: '◎' },
+  { id: 'vehicle',     label: 'Vehicle',       icon: '⬡' },
+  { id: 'rival',       label: 'Rival',         icon: '★' },
+  { id: 'session',     label: 'Session',       icon: '⚑' },
+  { id: 'engineer',    label: 'Engineer',      icon: '⚙' },
+  { id: 'radio',       label: 'Radio Config',  icon: '♫' },
+  { id: 'settings',    label: 'Settings',      icon: '≣' },
 ];
 
 export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
-  const { connected, session, startTelemetry, stopTelemetry } = useTelemetryContext();
+  const { connected, session, startTelemetry, stopTelemetry, rivalCarIndex, slot } = useTelemetryContext();
+  const { telemetryPorts } = usePrefs();
+  const primaryPort = telemetryPorts[0] ?? 20777;
+
+  const popOutPage = (page: Page, e: React.MouseEvent) => {
+    e.stopPropagation();
+    api.openPageWindow(page, slot).catch((err) => console.error('openPageWindow:', err));
+  };
 
   return (
     <aside className="sidebar">
@@ -42,6 +54,9 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
         </div>
       )}
 
+      <SessionTimer />
+      <DriverSwitcher />
+
       <nav className="nav-list">
         {NAV_ITEMS.map((item) => (
           <button
@@ -51,6 +66,17 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
           >
             <span className="nav-icon">{item.icon}</span>
             <span className="nav-label">{item.label}</span>
+            {item.id === 'rival' && rivalCarIndex != null && (
+              <span className="nav-badge">★</span>
+            )}
+            <span
+              role="button"
+              className="nav-popout-btn"
+              title={`Pop ${item.label} into its own window`}
+              onClick={(e) => popOutPage(item.id, e)}
+            >
+              ⧉
+            </span>
           </button>
         ))}
       </nav>
@@ -58,7 +84,7 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
       <div className="sidebar-footer">
         <button
           className={`telemetry-btn ${connected ? 'stop' : 'start'}`}
-          onClick={() => connected ? stopTelemetry() : startTelemetry(20777)}
+          onClick={() => connected ? stopTelemetry() : startTelemetry(primaryPort)}
         >
           {connected ? 'Stop Telemetry' : 'Start Telemetry'}
         </button>

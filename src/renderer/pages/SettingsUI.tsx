@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useTelemetryContext } from '../context/TelemetryContext';
+import { usePrefs } from '../context/PrefsContext';
 import { usePushToTalk } from '../hooks/usePushToTalk';
 import { clearCache, getStats as getCacheStats } from '../lib/phrase-cache';
 
 import { api } from '../lib/tauri-api';
+import type { DriverNameMask } from '../../shared/types/store';
 
 const TTS_VOICES = [
   { id: 'en-GB-RyanNeural', label: 'Ryan (British Male) — Engineer-like' },
@@ -30,10 +32,13 @@ const TRACK_NAMES: Record<number, string> = {
 
 export function Settings() {
   const { connected, session } = useTelemetryContext();
+  const prefs = usePrefs();
 
   const [port, setPort] = useState(20777);
   const [apiKey, setApiKey] = useState('');
   const [premium, setPremium] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<'idle' | 'validating' | 'valid' | 'invalid'>('idle');
+  const [keyError, setKeyError] = useState<string | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState(false);
   const [ttsVoice, setTtsVoice] = useState('en-GB-RyanNeural');
   const [ttsRate, setTtsRate] = useState(1.0);
@@ -48,7 +53,11 @@ export function Settings() {
   useEffect(() => {
     api.loadSettings?.().then((settings: any) => {
       if (!settings) return;
-      if (settings.apiKey) setApiKey(settings.apiKey);
+      if (settings.apiKey) {
+        setApiKey(settings.apiKey);
+        // If we previously saved a valid key, assume it's still good unless re-validated.
+        if (settings.keyValidatedAt) setKeyStatus('valid');
+      }
       if (typeof settings.premium === 'boolean') setPremium(settings.premium);
       if (settings.tts?.enabled != null) setTtsEnabled(settings.tts.enabled);
       if (settings.tts?.voice) setTtsVoice(settings.tts.voice);
@@ -59,9 +68,61 @@ export function Settings() {
     getCacheStats().then(setCacheStats).catch(() => {});
   }, []);
 
-  const applyApiKey = useCallback(() => {
-    if (apiKey.trim()) api.setApiKey(apiKey.trim());
+  /**
+   * Connect Premium: validates the key, on success persists it + turns Premium on.
+   * This is the only path that flips premium to true — the user no longer toggles it directly.
+   */
+  const connectPremium = useCallback(async () => {
+    const key = apiKey.trim();
+    if (!key) { setKeyError('Paste your Anthropic API key first.'); setKeyStatus('invalid'); return; }
+    setKeyStatus('validating');
+    setKeyError(null);
+    try {
+      const r = await api.validateApiKey(key);
+      if (r.valid) {
+        setKeyStatus('valid');
+        await api.setApiKey(key);
+        await api.setPremium(true);
+        setPremium(true);
+        const prev: any = (await api.loadSettings?.()) ?? {};
+        await api.saveSettings?.({
+          ...prev,
+          apiKey: key,
+          premium: true,
+          keyValidatedAt: Date.now(),
+        });
+        api.getUsage?.().then(setUsage).catch(() => {});
+      } else {
+        setKeyStatus('invalid');
+        setKeyError(r.error || 'Key rejected by Anthropic.');
+        await api.setPremium(false);
+        setPremium(false);
+      }
+    } catch (e: any) {
+      setKeyStatus('invalid');
+      setKeyError(String(e?.message || e));
+    }
   }, [apiKey]);
+
+  const disconnectPremium = useCallback(async () => {
+    await api.setPremium(false);
+    setPremium(false);
+    const prev: any = (await api.loadSettings?.()) ?? {};
+    await api.saveSettings?.({ ...prev, premium: false });
+  }, []);
+
+  const removeKey = useCallback(async () => {
+    setApiKey('');
+    setKeyStatus('idle');
+    setKeyError(null);
+    await api.setApiKey('');
+    await api.setPremium(false);
+    setPremium(false);
+    const prev: any = (await api.loadSettings?.()) ?? {};
+    delete prev.apiKey;
+    delete prev.keyValidatedAt;
+    await api.saveSettings?.({ ...prev, premium: false });
+  }, []);
 
   const testVoice = useCallback(() => {
     api.ttsSpeak({ text: 'Box this lap, box this lap. Tyres are ready.', voice: ttsVoice });
@@ -72,26 +133,17 @@ export function Settings() {
     api.setManualTrack(trackId);
   }, []);
 
-  const togglePremium = useCallback(async (enabled: boolean) => {
-    setPremium(enabled);
-    try { await api.setPremium(enabled); } catch { /* ignore */ }
-  }, []);
-
   const saveAll = useCallback(async () => {
-    if (apiKey.trim()) await api.setApiKey(apiKey.trim());
-    await api.setPremium(premium);
     const prev: any = (await api.loadSettings?.()) ?? {};
     await api.saveSettings?.({
       ...prev,
-      apiKey: apiKey.trim() || undefined,
-      premium,
       tts: { enabled: ttsEnabled, voice: ttsVoice, rate: ttsRate },
       telemetryPort: port,
       ptt: { ...(prev.ptt ?? {}), binding: ptt.binding },
     });
     setSaveStatus('Saved!');
     setTimeout(() => setSaveStatus(null), 2000);
-  }, [apiKey, premium, ttsEnabled, ttsVoice, ttsRate, port, ptt.binding]);
+  }, [ttsEnabled, ttsVoice, ttsRate, port, ptt.binding]);
 
   const refreshUsage = useCallback(() => {
     api.getUsage?.().then(setUsage).catch(() => {});
@@ -199,61 +251,93 @@ export function Settings() {
 
         {/* Right Column */}
         <div className="settings-col">
-          {/* Premium */}
+          {/* Subscription (unified: key + premium status) */}
           <div className="panel">
-            <h3 className="panel-title">SUBSCRIPTION</h3>
-            <div className="settings-field">
-              <label className="toggle-label">
-                <input type="checkbox" checked={premium}
-                  onChange={e => togglePremium(e.target.checked)} />
-                Premium (AI Strategy Calls via Claude Haiku 4.5)
-              </label>
-            </div>
-            <p className="settings-note">
-              Free mode uses the offline rule engine only — no API cost. Premium unlocks
-              dynamic strategy calls (pit windows, undercuts, weather). Typical full race
-              weekend costs under $0.20 in API credits with prompt caching.
+            <h3 className="panel-title">
+              SUBSCRIPTION
+              <span className={`sub-badge sub-${premium && keyStatus === 'valid' ? 'active' : 'inactive'}`}>
+                {premium && keyStatus === 'valid' ? 'PREMIUM ACTIVE' :
+                 premium && keyStatus !== 'valid' ? 'NEEDS VALIDATION' : 'FREE'}
+              </span>
+            </h3>
+
+            <p className="settings-note" style={{ marginTop: 0 }}>
+              Free mode runs the full offline rule engine. Premium adds live AI strategy
+              calls (pit windows, undercuts, weather) via Claude Haiku 4.5.
+              A full race weekend typically costs under <strong>$0.20</strong> in API credits.
             </p>
-            {usage && (
-              <div className="stat-list" style={{ marginTop: 10 }}>
-                <div className="stat-row-item">
-                  <span className="stat-label-text">Session cost</span>
-                  <span className="stat-value-text">${(usage.costUsd ?? 0).toFixed(4)}</span>
-                </div>
-                <div className="stat-row-item">
-                  <span className="stat-label-text">Input tokens</span>
-                  <span className="stat-value-text">{usage.inputTokens}</span>
-                </div>
-                <div className="stat-row-item">
-                  <span className="stat-label-text">Cached input</span>
-                  <span className="stat-value-text">{usage.cachedInputTokens}</span>
-                </div>
-                <div className="stat-row-item">
-                  <span className="stat-label-text">Output tokens</span>
-                  <span className="stat-value-text">{usage.outputTokens}</span>
-                </div>
+
+            <div className="settings-field">
+              <label>Anthropic API Key</label>
+              <input type="password"
+                className={`settings-input key-input key-${keyStatus}`}
+                placeholder="sk-ant-..."
+                value={apiKey}
+                onChange={(e) => { setApiKey(e.target.value); setKeyStatus('idle'); setKeyError(null); }} />
+            </div>
+
+            <div className="sub-actions">
+              {!premium || keyStatus !== 'valid' ? (
+                <button
+                  className="btn-save-all"
+                  onClick={connectPremium}
+                  disabled={keyStatus === 'validating' || apiKey.trim().length < 10}
+                >
+                  {keyStatus === 'validating' ? 'Validating…' : 'Connect Premium'}
+                </button>
+              ) : (
+                <>
+                  <button className="btn-action" onClick={disconnectPremium}>
+                    Disconnect (keep key)
+                  </button>
+                  <button className="btn-action btn-danger" onClick={removeKey}>
+                    Remove Key
+                  </button>
+                </>
+              )}
+            </div>
+
+            {keyStatus === 'invalid' && keyError && (
+              <div className="sub-alert sub-alert-err">✕ {keyError}</div>
+            )}
+            {keyStatus === 'valid' && (
+              <div className="sub-alert sub-alert-ok">
+                ✓ Key verified. Model: Haiku 4.5. AI calls will use this key.
               </div>
             )}
-            <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
-              <button className="btn-action" onClick={refreshUsage}>Refresh Usage</button>
-              <button className="btn-action" onClick={resetUsage}>Reset Counter</button>
-            </div>
-          </div>
 
-          {/* API Key */}
-          <div className="panel">
-            <h3 className="panel-title">ANTHROPIC API KEY</h3>
-            <div className="settings-field">
-              <label>API Key</label>
-              <input type="password" className="settings-input" placeholder="sk-ant-..."
-                value={apiKey} onChange={e => setApiKey(e.target.value)} />
-            </div>
-            <button className="btn-action" onClick={applyApiKey} style={{ marginTop: 8 }}>
-              Apply Key
-            </button>
-            <p className="settings-note" style={{ marginTop: 6 }}>
-              Required for Premium. Get a key at console.anthropic.com.
+            <p className="settings-note" style={{ marginTop: 10 }}>
+              Don't have one? Get a key at{' '}
+              <code>console.anthropic.com</code>. Typical cost: $5 credits = 25+ weekends.
             </p>
+
+            {usage && (
+              <>
+                <h4 className="sub-subhead">API USAGE — This session</h4>
+                <div className="stat-list">
+                  <div className="stat-row-item">
+                    <span className="stat-label-text">Cost</span>
+                    <span className="stat-value-text">${(usage.costUsd ?? 0).toFixed(4)}</span>
+                  </div>
+                  <div className="stat-row-item">
+                    <span className="stat-label-text">Input tokens</span>
+                    <span className="stat-value-text">{usage.inputTokens}</span>
+                  </div>
+                  <div className="stat-row-item">
+                    <span className="stat-label-text">Cached input</span>
+                    <span className="stat-value-text">{usage.cachedInputTokens}</span>
+                  </div>
+                  <div className="stat-row-item">
+                    <span className="stat-label-text">Output tokens</span>
+                    <span className="stat-value-text">{usage.outputTokens}</span>
+                  </div>
+                </div>
+                <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+                  <button className="btn-small" onClick={refreshUsage}>Refresh</button>
+                  <button className="btn-small" onClick={resetUsage}>Reset</button>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Push-to-Talk */}
@@ -303,6 +387,137 @@ export function Settings() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* Multi-driver Ports */}
+      <div className="panel" style={{ margin: '0 12px 14px' }}>
+        <h3 className="panel-title">MULTI-DRIVER PORTS</h3>
+        <p className="settings-note" style={{ marginTop: 0, marginBottom: 10 }}>
+          Engineer multiple drivers at once. Each slot binds one UDP port. Use the
+          switcher in the sidebar to choose which driver the main window shows, or
+          click ⧉ to pop a driver into their own window.
+          The first port here is also used by the main "Start Telemetry" button.
+        </p>
+        {prefs.telemetryPorts.map((p, i) => (
+          <div className="mask-row" key={i}>
+            <input type="number" className="settings-input"
+              min={1} max={65535}
+              value={p}
+              onChange={(e) => {
+                const next = [...prefs.telemetryPorts];
+                next[i] = parseInt(e.target.value) || 0;
+                prefs.setPrefs({ telemetryPorts: next });
+              }} />
+            <span className="dim" style={{ fontSize: 11, alignSelf: 'center' }}>
+              Slot: {i === 0 ? 'primary' : `d${i + 1}`}
+            </span>
+            {prefs.telemetryPorts.length > 1 && (
+              <button className="btn-small btn-mask-del"
+                onClick={() => {
+                  const next = prefs.telemetryPorts.filter((_, idx) => idx !== i);
+                  prefs.setPrefs({ telemetryPorts: next.length > 0 ? next : [20777] });
+                }}>✕</button>
+            )}
+          </div>
+        ))}
+        {prefs.telemetryPorts.length < 4 && (
+          <button className="btn-action"
+            onClick={() => {
+              const last = prefs.telemetryPorts[prefs.telemetryPorts.length - 1] ?? 20777;
+              prefs.setPrefs({ telemetryPorts: [...prefs.telemetryPorts, last + 1] });
+            }}>+ Add driver port</button>
+        )}
+      </div>
+
+      {/* Display & HUD */}
+      <div className="panel" style={{ margin: '0 12px 14px' }}>
+        <h3 className="panel-title">DISPLAY & HUD</h3>
+        <div className="settings-field">
+          <label className="toggle-label">
+            <input type="checkbox" checked={prefs.showSessionTimer}
+              onChange={e => prefs.setPrefs({ showSessionTimer: e.target.checked })} />
+            Show Session Timer in sidebar
+          </label>
+        </div>
+      </div>
+
+      {/* Stream Overlay */}
+      <div className="panel" style={{ margin: '0 12px 14px' }}>
+        <h3 className="panel-title">STREAM OVERLAY</h3>
+        <p className="settings-note" style={{ marginTop: 0, marginBottom: 10 }}>
+          Compact always-on-top window with live timing — capture it in OBS with
+          "Window Capture" or "Game Capture". Dark background is chroma-key friendly.
+        </p>
+        <button className="btn-action" onClick={() => api.openOverlayWindow?.()}>
+          Open Overlay Window
+        </button>
+      </div>
+
+      {/* LAN Relay */}
+      <div className="panel" style={{ margin: '0 12px 14px' }}>
+        <h3 className="panel-title">LAN TELEMETRY RELAY</h3>
+        <p className="settings-note" style={{ marginTop: 0, marginBottom: 10 }}>
+          Forward every UDP packet to another machine (e.g. your race engineer on a
+          RadminVPN / LAN). Both machines receive the same feed.
+        </p>
+        <div className="settings-field">
+          <label className="toggle-label">
+            <input type="checkbox" checked={prefs.lanRelayEnabled}
+              onChange={(e) => prefs.setPrefs({ lanRelayEnabled: e.target.checked })} />
+            Enable LAN relay
+          </label>
+        </div>
+        <div className="mask-row">
+          <input type="text" className="settings-input"
+            placeholder="host (e.g. 192.168.0.42)"
+            value={prefs.lanRelayHost}
+            onChange={(e) => prefs.setPrefs({ lanRelayHost: e.target.value })} />
+          <input type="number" className="settings-input"
+            min={1} max={65535}
+            placeholder="port"
+            value={prefs.lanRelayPort}
+            onChange={(e) => prefs.setPrefs({ lanRelayPort: parseInt(e.target.value) || 20778 })} />
+          <span />
+        </div>
+      </div>
+
+      {/* Driver Name Masks */}
+      <div className="panel" style={{ margin: '0 12px 14px' }}>
+        <h3 className="panel-title">DRIVER NAME MASKS</h3>
+        <p className="settings-note" style={{ marginTop: 0, marginBottom: 10 }}>
+          Clean up messy online usernames. Each row is a case-insensitive regex applied in order.
+          Example: pattern <code>^AOR_</code> replace <code></code> turns <code>AOR_VETTEL</code> into <code>VETTEL</code>.
+        </p>
+        {prefs.driverNameMasks.map((m, i) => (
+          <div className="mask-row" key={i}>
+            <input className="settings-input"
+              placeholder="regex pattern"
+              value={m.pattern}
+              onChange={(e) => {
+                const next = [...prefs.driverNameMasks];
+                next[i] = { ...next[i], pattern: e.target.value };
+                prefs.setPrefs({ driverNameMasks: next });
+              }} />
+            <input className="settings-input"
+              placeholder="replace with"
+              value={m.replace}
+              onChange={(e) => {
+                const next = [...prefs.driverNameMasks];
+                next[i] = { ...next[i], replace: e.target.value };
+                prefs.setPrefs({ driverNameMasks: next });
+              }} />
+            <button className="btn-small btn-mask-del"
+              onClick={() => {
+                const next = prefs.driverNameMasks.filter((_, idx) => idx !== i);
+                prefs.setPrefs({ driverNameMasks: next });
+              }}>✕</button>
+          </div>
+        ))}
+        <button className="btn-action"
+          onClick={() => {
+            const next: DriverNameMask[] = [...prefs.driverNameMasks, { pattern: '', replace: '' }];
+            prefs.setPrefs({ driverNameMasks: next });
+          }}>+ Add mask</button>
       </div>
 
       {/* Save All */}
