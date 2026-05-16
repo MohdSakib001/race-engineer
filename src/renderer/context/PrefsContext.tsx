@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { api } from '../lib/tauri-api';
 import type { DriverNameMask } from '../../shared/types/store';
+import { defaultRadioConfig, normalizeRadioConfig, type RadioConfig } from '../lib/radio-canonical';
 
 export interface AppPrefs {
   driverNameMasks: DriverNameMask[];
@@ -24,6 +25,10 @@ export interface AppPrefs {
   lanRelayPort: number;
   /** When on, the engineer voice speaks every race-control message. */
   radioVoiceEnabled: boolean;
+  /** Per-category / per-situation enables for the auto-radio engine. */
+  radioConfig: RadioConfig;
+  /** Master kill-switch — same checkbox as RadioConfigUI's Master Radio. */
+  radioMasterEnabled: boolean;
 }
 
 interface PrefsContextValue extends AppPrefs {
@@ -50,6 +55,8 @@ const DEFAULT_PREFS: AppPrefs = {
   lanRelayHost: '',
   lanRelayPort: 20778,
   radioVoiceEnabled: false,
+  radioConfig: defaultRadioConfig(),
+  radioMasterEnabled: true,
 };
 
 const PrefsContext = createContext<PrefsContextValue | null>(null);
@@ -82,6 +89,8 @@ export function PrefsProvider({ children }: { children: ReactNode }) {
         lanRelayHost: typeof s.lanRelay?.host === 'string' ? s.lanRelay.host : '',
         lanRelayPort: typeof s.lanRelay?.port === 'number' ? s.lanRelay.port : 20778,
         radioVoiceEnabled: !!s.radioVoiceEnabled,
+        radioConfig: normalizeRadioConfig(s.radioConfig),
+        radioMasterEnabled: s.radioMasterEnabled !== false,
       });
     } catch { /* ignore */ }
   }, []);
@@ -117,6 +126,8 @@ export function PrefsProvider({ children }: { children: ReactNode }) {
           port: next.lanRelayPort,
         },
         radioVoiceEnabled: next.radioVoiceEnabled,
+        radioConfig: next.radioConfig,
+        radioMasterEnabled: next.radioMasterEnabled,
       });
       // Push LAN relay to backend so it takes effect now
       try {

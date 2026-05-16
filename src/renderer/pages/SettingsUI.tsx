@@ -5,6 +5,7 @@ import { usePushToTalk } from '../hooks/usePushToTalk';
 import { clearCache, getStats as getCacheStats } from '../lib/phrase-cache';
 
 import { api } from '../lib/tauri-api';
+import type { NetworkDiagnosis, NetworkSetupResult } from '../lib/tauri-api';
 import type { DriverNameMask } from '../../shared/types/store';
 
 const TTS_VOICES = [
@@ -46,6 +47,11 @@ export function Settings() {
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [usage, setUsage] = useState<any>(null);
   const [cacheStats, setCacheStats] = useState<{ entries: number; totalHits: number } | null>(null);
+  const [diag, setDiag] = useState<NetworkDiagnosis | null>(null);
+  const [diagLoading, setDiagLoading] = useState(false);
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [setupResult, setSetupResult] = useState<NetworkSetupResult | null>(null);
+  const [showManualSteps, setShowManualSteps] = useState(false);
 
   const ptt = usePushToTalk({ onQuery: () => { /* Settings doesn't dispatch; learning only */ } });
 
@@ -157,6 +163,54 @@ export function Settings() {
     await clearCache();
     const s = await getCacheStats();
     setCacheStats(s);
+  }, []);
+
+  // ── Network Connectivity ───────────────────────────────────────────────
+  const runDiagnose = useCallback(async () => {
+    setDiagLoading(true);
+    try {
+      const d = await api.networkDiagnose(port);
+      setDiag(d);
+    } catch {
+      setDiag(null);
+    } finally {
+      setDiagLoading(false);
+    }
+  }, [port]);
+
+  const runAutoSetup = useCallback(async () => {
+    setSetupBusy(true);
+    setSetupResult(null);
+    try {
+      const r = await api.networkAutoSetup(port);
+      setSetupResult(r);
+      const d = await api.networkDiagnose(port);
+      setDiag(d);
+    } catch (e: any) {
+      setSetupResult({
+        firewall: { ok: false, error: String(e?.message ?? e) },
+        upnp: { ok: false, error: 'skipped due to firewall failure' },
+      });
+    } finally {
+      setSetupBusy(false);
+    }
+  }, [port]);
+
+  const runRemoveSetup = useCallback(async () => {
+    setSetupBusy(true);
+    setSetupResult(null);
+    try {
+      const r = await api.networkRemoveSetup(port);
+      setSetupResult(r);
+      const d = await api.networkDiagnose(port);
+      setDiag(d);
+    } finally {
+      setSetupBusy(false);
+    }
+  }, [port]);
+
+  const openUrl = useCallback((url: string) => {
+    api.openExternalUrl(url).catch(() => {});
   }, []);
 
   const sortedTracks = Object.entries(TRACK_NAMES).sort((a, b) => a[1].localeCompare(b[1]));
@@ -451,6 +505,265 @@ export function Settings() {
         <button className="btn-action" onClick={() => api.openOverlayWindow?.()}>
           Open Overlay Window
         </button>
+      </div>
+
+      {/* Network Connectivity — auto-firewall + UPnP + manual + VPN fallbacks */}
+      <div className="panel" style={{ margin: '0 12px 14px' }}>
+        <h3 className="panel-title">NETWORK CONNECTIVITY</h3>
+        <p className="settings-note" style={{ marginTop: 0, marginBottom: 10 }}>
+          Use this if the F1 game is on a <strong>different machine</strong> and you
+          want telemetry to reach this PC over your home network or the internet.
+          Local single-PC play does not need any of this.
+        </p>
+
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+          <button className="btn-save-all" onClick={runAutoSetup} disabled={setupBusy}>
+            {setupBusy ? 'Working…' : `⚡ Auto Setup (UDP ${port})`}
+          </button>
+          <button className="btn-action" onClick={runDiagnose} disabled={diagLoading}>
+            {diagLoading ? 'Diagnosing…' : 'Diagnose'}
+          </button>
+          {(diag?.ourFirewallRule || diag?.upnp?.mapped) && (
+            <button
+              className="btn-action btn-danger"
+              onClick={runRemoveSetup}
+              disabled={setupBusy}
+            >
+              Remove Setup
+            </button>
+          )}
+        </div>
+
+        <p className="settings-note" style={{ marginTop: 0 }}>
+          Auto Setup will (1) add a Windows Firewall inbound rule for UDP {port} and
+          (2) ask your router (UPnP) to forward UDP {port} to this PC.{' '}
+          <strong>Windows will prompt for admin permission</strong> — click Yes.
+        </p>
+        <p className="settings-note" style={{ marginTop: 0, fontStyle: 'italic' }}>
+          Already configured these manually? You don't need this — auto setup is
+          only here for convenience. The diagnostic below will detect any existing
+          firewall rule that covers UDP {port}, including ones you added yourself.
+          UPnP being unavailable is not a problem if you've already port-forwarded
+          on your router.
+        </p>
+
+        {diag && (
+          <div className="stat-list" style={{ marginTop: 10 }}>
+            <div className="stat-row-item">
+              <span className="stat-label-text">Local IP (this PC)</span>
+              <span className="stat-value-text">{diag.localIp ?? '—'}</span>
+            </div>
+            <div className="stat-row-item">
+              <span className="stat-label-text">Public IP</span>
+              <span className="stat-value-text">
+                {diag.publicIp ?? 'not reachable'}
+                {diag.cgnatLikely && (
+                  <span style={{ color: '#ffb84d', marginLeft: 8 }}>
+                    ⚠ CGNAT — port-forwarding can't work, use VPN below
+                  </span>
+                )}
+              </span>
+            </div>
+            {diag.platform === 'windows' && (
+              <div className="stat-row-item">
+                <span className="stat-label-text">Windows Firewall (UDP {port})</span>
+                <span
+                  className={`stat-value-text ${diag.firewallRuleExists ? 'status-on' : 'status-off'}`}
+                >
+                  {diag.firewallRuleExists ? (
+                    <>
+                      ✓ allowed
+                      {diag.firewallRules.length > 0 && (
+                        <span className="dim" style={{ marginLeft: 6, fontSize: 11 }}>
+                          by {diag.firewallRules.length === 1
+                            ? `"${diag.firewallRules[0]}"`
+                            : `${diag.firewallRules.length} rules`}
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    '✕ no rule covers this port'
+                  )}
+                </span>
+              </div>
+            )}
+            <div className="stat-row-item">
+              <span className="stat-label-text">Router port-forward (UPnP)</span>
+              <span
+                className={`stat-value-text ${diag.upnp.mapped ? 'status-on' : ''}`}
+              >
+                {diag.upnp.mapped ? (
+                  '✓ active (UPnP)'
+                ) : !diag.upnp.available ? (
+                  <span className="dim">
+                    not available — fine if you've port-forwarded manually
+                  </span>
+                ) : (
+                  <span className="dim">
+                    not auto-mapped — fine if you've port-forwarded manually
+                  </span>
+                )}
+              </span>
+            </div>
+            {diag.upnp.gatewayIp && (
+              <div className="stat-row-item">
+                <span className="stat-label-text">Router</span>
+                <span className="stat-value-text">
+                  {diag.upnp.gatewayIp}
+                  {diag.upnp.gatewayAdminUrl && (
+                    <>
+                      {' '}
+                      <button
+                        className="btn-link"
+                        onClick={() => openUrl(diag.upnp.gatewayAdminUrl!)}
+                      >
+                        open admin
+                      </button>
+                    </>
+                  )}
+                </span>
+              </div>
+            )}
+            {diag.upnp.externalIp && diag.upnp.externalIp !== diag.publicIp && (
+              <div className="stat-row-item">
+                <span className="stat-label-text">Router-reported WAN IP</span>
+                <span className="stat-value-text">{diag.upnp.externalIp}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {setupResult && (
+          <div style={{ marginTop: 10 }}>
+            <div
+              className={`sub-alert ${setupResult.firewall.ok ? 'sub-alert-ok' : 'sub-alert-err'}`}
+            >
+              Firewall:{' '}
+              {setupResult.firewall.ok
+                ? '✓ rule installed'
+                : setupResult.firewall.skipped
+                  ? '— not applicable on this OS'
+                  : `✕ ${setupResult.firewall.error ?? 'unknown error'}`}
+            </div>
+            <div
+              className={`sub-alert ${setupResult.upnp.ok ? 'sub-alert-ok' : 'sub-alert-err'}`}
+              style={{ marginTop: 6 }}
+            >
+              UPnP:{' '}
+              {setupResult.upnp.ok
+                ? `✓ forwarded — game can target ${setupResult.upnp.externalIp ?? 'your public IP'}:${port}`
+                : `✕ ${setupResult.upnp.error ?? 'unknown error'}`}
+            </div>
+          </div>
+        )}
+
+        {/* Manual fallback */}
+        <h4 className="sub-subhead" style={{ marginTop: 14 }}>
+          Auto setup didn't work?{' '}
+          <button
+            className="btn-link"
+            style={{ marginLeft: 8 }}
+            onClick={() => setShowManualSteps((s) => !s)}
+          >
+            {showManualSteps ? 'Hide' : 'Show'} manual port-forward steps
+          </button>
+        </h4>
+        {showManualSteps && (
+          <ol
+            style={{
+              paddingLeft: 20,
+              fontSize: 13,
+              lineHeight: 1.7,
+              color: '#cbd2da',
+              marginTop: 6,
+            }}
+          >
+            <li>
+              Open your router admin page:{' '}
+              {diag?.upnp.gatewayAdminUrl ? (
+                <button
+                  className="btn-link"
+                  onClick={() => openUrl(diag.upnp.gatewayAdminUrl!)}
+                >
+                  {diag.upnp.gatewayAdminUrl}
+                </button>
+              ) : (
+                <>
+                  try{' '}
+                  <button
+                    className="btn-link"
+                    onClick={() => openUrl('http://192.168.1.1')}
+                  >
+                    http://192.168.1.1
+                  </button>{' '}
+                  or{' '}
+                  <button
+                    className="btn-link"
+                    onClick={() => openUrl('http://192.168.0.1')}
+                  >
+                    http://192.168.0.1
+                  </button>
+                </>
+              )}
+              . Log in with the password printed on the back of the router (or the
+              defaults <code>admin</code> / <code>admin</code>).
+            </li>
+            <li>
+              Find the section called <strong>Port Forwarding</strong>,{' '}
+              <strong>Virtual Server</strong>, or <strong>NAT</strong> (label varies
+              by brand: TP-Link, Asus, Netgear all use slightly different wording).
+            </li>
+            <li>
+              Add a new rule:
+              <ul style={{ marginTop: 4 }}>
+                <li>
+                  Protocol: <code>UDP</code>
+                </li>
+                <li>
+                  External / WAN port: <code>{port}</code>
+                </li>
+                <li>
+                  Internal / LAN port: <code>{port}</code>
+                </li>
+                <li>
+                  Internal IP: <code>{diag?.localIp ?? 'this PC LAN IP'}</code>
+                </li>
+              </ul>
+            </li>
+            <li>Save / Apply, then click Diagnose above to verify.</li>
+            <li>
+              If the public IP above starts with <code>100.64</code>–
+              <code>100.127</code>, your ISP uses CGNAT — port forwarding{' '}
+              <em>cannot</em> work on your line. Use a VPN below instead.
+            </li>
+          </ol>
+        )}
+
+        {/* VPN alternative */}
+        <h4 className="sub-subhead" style={{ marginTop: 14 }}>
+          VPN alternative — easier &amp; works behind CGNAT
+        </h4>
+        <p className="settings-note" style={{ marginTop: 0 }}>
+          Install one of these on <strong>both</strong> machines (the one running the
+          F1 game and this one), sign in to the same account, and use the
+          VPN-assigned IP (Tailscale gives you <code>100.x.y.z</code>) as the UDP
+          target inside the F1 game settings. No router config or firewall rule
+          needed.
+        </p>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button
+            className="btn-action"
+            onClick={() => openUrl('https://tailscale.com/download')}
+          >
+            Download Tailscale (recommended)
+          </button>
+          <button
+            className="btn-action"
+            onClick={() => openUrl('https://www.zerotier.com/download/')}
+          >
+            Download ZeroTier
+          </button>
+        </div>
       </div>
 
       {/* LAN Relay */}

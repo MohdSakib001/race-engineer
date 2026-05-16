@@ -111,7 +111,59 @@ export const api = {
 
   ttsSpeak: (payload: { text: string; voice?: string }) =>
     invoke<string>('tts_speak', { payload }),
+
+  // ── Network connectivity (firewall + UPnP) ────────────────────────────
+  networkDiagnose: (port: number) =>
+    invoke<NetworkDiagnosis>('network_diagnose', { port }),
+
+  networkAutoSetup: (port: number) =>
+    invoke<NetworkSetupResult>('network_auto_setup', { port }),
+
+  networkRemoveSetup: (port: number) =>
+    invoke<NetworkSetupResult>('network_remove_setup', { port }),
+
+  openExternalUrl: (url: string) =>
+    invoke<void>('open_external_url', { url }),
 };
+
+export interface NetworkDiagnosis {
+  port: number;
+  platform: string;                    // "windows" | "macos" | "linux"
+  localIp: string | null;
+  localIps: string[];
+  publicIp: string | null;
+  cgnatLikely: boolean;
+  /** True if any inbound UDP allow-rule covers the port (manual + ours). */
+  firewallRuleExists: boolean;
+  /** Display names of every matching rule (often includes user-installed ones). */
+  firewallRules: string[];
+  /** True only when our specific named rule is present — gates Remove Setup. */
+  ourFirewallRule: boolean;
+  upnp: {
+    available: boolean;
+    mapped: boolean;
+    externalIp?: string | null;
+    gatewayIp?: string | null;
+    gatewayAdminUrl?: string | null;
+    error?: string | null;
+  };
+}
+
+export interface NetworkStepResult {
+  ok: boolean;
+  error?: string;
+  userDeclined?: boolean;
+  skipped?: boolean;
+  externalIp?: string | null;
+  leaseSeconds?: number;
+  localIp?: string;
+  code?: number;
+}
+
+export interface NetworkSetupResult {
+  firewall: NetworkStepResult;
+  upnp: NetworkStepResult;
+}
 
 export type StrategyAction =
   | 'pit_now' | 'pit_next_lap' | 'pit_in_n_laps' | 'stay_out'

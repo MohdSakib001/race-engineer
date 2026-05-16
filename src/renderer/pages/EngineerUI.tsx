@@ -3,7 +3,7 @@ import { useTelemetryContext } from '../context/TelemetryContext';
 import { useAutoRadio } from '../hooks/useAutoRadio';
 import { usePushToTalk } from '../hooks/usePushToTalk';
 import { useStrategyCalls } from '../hooks/useStrategyCalls';
-import { globalInteractionTracker, shouldSpeak } from '../lib/emergency-gate';
+import { globalInteractionTracker } from '../lib/emergency-gate';
 import { speak as ttsSpeakQueued, stop as ttsStop } from '../lib/tts-speaker';
 import { api, type StrategyDecision } from '../lib/tauri-api';
 import type { TelemetrySources } from '../lib/strategy-pipeline';
@@ -39,30 +39,9 @@ export function Engineer() {
     api.getPremium?.().then((p) => setPremium(!!p?.premium)).catch(() => {});
   }, []);
 
-  // Auto-radio (rule-based) — pass ttsEnabled=false so the hook's internal speaker
-  // stays silent; the gated speaker below owns all voice playback.
-  const { messages, clearMessages } = useAutoRadio(ctx, false, ttsVoice);
-
-  // Speak gating — most recent message
-  useEffect(() => {
-    if (!ttsEnabled || messages.length === 0) return;
-    const latest = messages[messages.length - 1];
-    const gate = shouldSpeak({
-      category: latest.category,
-      urgency: latest.urgency,
-      situation: latest.category,
-      userAsked: false,
-      lastUserInteractionAt: globalInteractionTracker.getLastAt(),
-    });
-    if (gate.shouldSpeak) {
-      const priority = latest.urgency === 'critical' ? 9 : latest.urgency === 'high' ? 7 : 4;
-      ttsSpeakQueued(latest.text, {
-        voice: ttsVoice,
-        priority,
-        interrupt: latest.urgency === 'critical',
-      });
-    }
-  }, [messages.length, ttsEnabled, ttsVoice, messages]);
+  // Auto-radio (rule-based). The hook handles its own queued TTS via tts-speaker
+  // and respects the emergency-idle gate internally — we just supply settings.
+  const { messages, clearMessages } = useAutoRadio(ctx, ttsEnabled, ttsVoice);
 
   // Strategy pipeline — feeds TelemetrySources
   const src: TelemetrySources = useMemo(() => ({

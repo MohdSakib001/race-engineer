@@ -1502,6 +1502,21 @@ body {
 }
 .radioconfig-sit-item:hover { background: var(--bg2); }
 .radioconfig-sit-item input { accent-color: var(--accent); }
+.radioconfig-sit-urgency {
+  margin-left: auto;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg3);
+  color: var(--text-dim);
+  font-weight: 600;
+}
+.radioconfig-sit-urgency.u-critical { background: #4d0f12; color: #ff8a90; }
+.radioconfig-sit-urgency.u-high     { background: #4a2a08; color: #ffb84d; }
+.radioconfig-sit-urgency.u-medium   { background: #2c3a14; color: #c8e872; }
+.radioconfig-sit-urgency.u-low      { background: #1a2638; color: #8fb4f0; }
 .radioconfig-footer {
   padding: 12px 16px;
   background: var(--bg1);

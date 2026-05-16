@@ -1,5 +1,6 @@
 mod parser;
 mod telemetry;
+mod network;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -1063,6 +1064,10 @@ pub fn run() {
             ask_engineer,
             call_strategy,
             tts_speak,
+            network::network_diagnose,
+            network::network_auto_setup,
+            network::network_remove_setup,
+            network::open_external_url,
         ])
         .setup(|app| {
             // Load API key + premium flag from saved settings on startup

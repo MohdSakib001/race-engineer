@@ -1,121 +1,102 @@
-import React, { useState, useCallback, useMemo } from 'react';
-
-interface CategoryDef {
-  label: string;
-  icon: string;
-  description: string;
-  situations: string[];
-}
-
-const RADIO_CATEGORIES: Record<string, CategoryDef> = {
-  tyres: { label: 'Tyre Management', icon: '🔄', description: 'Tyre wear, degradation, and compound advice', situations: ['high_wear', 'critical_wear', 'graining', 'blistering', 'cold_tyres', 'overheating', 'optimal_temp'] },
-  incident: { label: 'Incidents & Damage', icon: '⚠️', description: 'Damage reports and incident alerts', situations: ['wing_damage', 'floor_damage', 'puncture', 'engine_damage', 'gearbox_issue', 'ers_fault'] },
-  flags: { label: 'Flags & Safety Car', icon: '🏁', description: 'Flag conditions and safety car periods', situations: ['yellow_flag', 'safety_car', 'virtual_sc', 'red_flag', 'blue_flag', 'green_flag'] },
-  racecraft: { label: 'Racecraft & Battles', icon: '⚔️', description: 'Attack, defense, and DRS situations', situations: ['drs_available', 'car_behind_close', 'car_ahead_close', 'overtake_opportunity', 'defend_position', 'slipstream'] },
-  normal: { label: 'Race Progress', icon: '📊', description: 'Position changes, lap updates, fuel status', situations: ['position_gained', 'position_lost', 'fastest_lap', 'gap_change', 'fuel_warning', 'fuel_critical'] },
-  weather: { label: 'Weather', icon: '🌤️', description: 'Weather changes and rain predictions', situations: ['rain_incoming', 'rain_started', 'drying_track', 'temperature_change'] },
-  pit: { label: 'Pit Strategy', icon: '🔧', description: 'Pit window, undercut, and strategy calls', situations: ['pit_window_open', 'undercut_threat', 'overcut_opportunity', 'box_now', 'stay_out', 'sc_pit_opportunity'] },
-  ers: { label: 'ERS & Energy', icon: '⚡', description: 'Battery management and deployment', situations: ['low_battery', 'full_battery', 'harvest_mode', 'deploy_opportunity'] },
-  start: { label: 'Race Start', icon: '🏎️', description: 'Formation lap and start procedures', situations: ['formation_lap', 'lights_out', 'good_start', 'poor_start'] },
-  session: { label: 'Session Info', icon: '📋', description: 'Session timing and checkered flag', situations: ['session_start', 'halfway_point', 'final_laps', 'checkered_flag'] },
-  pace: { label: 'Pace Management', icon: '⏱️', description: 'Lap time analysis and pace advice', situations: ['personal_best', 'pace_drop', 'consistent_pace', 'sector_improvement'] },
-  drs: { label: 'DRS Zones', icon: '📡', description: 'DRS activation and deactivation', situations: ['drs_enabled', 'drs_disabled', 'drs_detection'] },
-  penalties: { label: 'Penalties', icon: '⛔', description: 'Track limits and penalty warnings', situations: ['track_limits_warning', 'penalty_received', 'penalty_served'] },
-  team: { label: 'Team Orders', icon: '📻', description: 'Team strategy and multi-car coordination', situations: ['hold_position', 'swap_positions', 'push_hard', 'manage_gap'] },
-  finish: { label: 'Race Finish', icon: '🏆', description: 'Final lap and results', situations: ['last_lap', 'finish_position', 'race_complete'] },
-};
-
-interface CategoryConfig {
-  enabled: boolean;
-  aiEnabled: boolean;
-  situations: Record<string, boolean>;
-}
-type RadioConfigState = Record<string, CategoryConfig>;
-
-function initConfig(): RadioConfigState {
-  const cfg: RadioConfigState = {};
-  for (const [key, cat] of Object.entries(RADIO_CATEGORIES)) {
-    const sits: Record<string, boolean> = {};
-    cat.situations.forEach(s => { sits[s] = true; });
-    cfg[key] = { enabled: true, aiEnabled: false, situations: sits };
-  }
-  return cfg;
-}
-
-function formatSitLabel(sit: string): string {
-  return sit.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-}
+import React, { useCallback, useMemo, useState } from 'react';
+import { usePrefs } from '../context/PrefsContext';
+import {
+  RADIO_CATEGORIES,
+  defaultRadioConfig,
+  formatSituationLabel,
+  type RadioConfig,
+} from '../lib/radio-canonical';
 
 export function RadioConfig() {
-  const [config, setConfig] = useState<RadioConfigState>(initConfig);
+  const { radioConfig, radioMasterEnabled, setPrefs } = usePrefs();
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [masterEnabled, setMasterEnabled] = useState(true);
 
   const aiCount = useMemo(() => {
-    let count = 0;
-    for (const [key, cat] of Object.entries(config)) {
-      if (cat.aiEnabled) count += RADIO_CATEGORIES[key]?.situations.length || 0;
+    let n = 0;
+    for (const cat of RADIO_CATEGORIES) {
+      if (radioConfig[cat.key]?.aiEnabled) n += cat.situations.length;
     }
-    return count;
-  }, [config]);
+    return n;
+  }, [radioConfig]);
+
+  const enabledCount = useMemo(() => {
+    let n = 0;
+    for (const cat of RADIO_CATEGORIES) {
+      const c = radioConfig[cat.key];
+      if (!c?.enabled) continue;
+      for (const s of cat.situations) {
+        if (c.situations[s.key] !== false) n++;
+      }
+    }
+    return n;
+  }, [radioConfig]);
+
+  const update = useCallback((producer: (cfg: RadioConfig) => RadioConfig) => {
+    setPrefs({ radioConfig: producer(radioConfig) });
+  }, [radioConfig, setPrefs]);
 
   const toggleCategory = useCallback((key: string, enabled: boolean) => {
-    setConfig(prev => ({ ...prev, [key]: { ...prev[key], enabled } }));
-  }, []);
+    update((prev) => ({ ...prev, [key]: { ...prev[key], enabled } }));
+  }, [update]);
 
   const toggleAi = useCallback((key: string, aiEnabled: boolean) => {
-    setConfig(prev => ({ ...prev, [key]: { ...prev[key], aiEnabled } }));
-  }, []);
+    update((prev) => ({ ...prev, [key]: { ...prev[key], aiEnabled } }));
+  }, [update]);
 
   const toggleSituation = useCallback((catKey: string, sit: string, enabled: boolean) => {
-    setConfig(prev => ({
+    update((prev) => ({
       ...prev,
       [catKey]: {
         ...prev[catKey],
         situations: { ...prev[catKey].situations, [sit]: enabled },
       },
     }));
-  }, []);
+  }, [update]);
 
   const toggleExpand = useCallback((key: string) => {
-    setExpanded(prev => ({ ...prev, [key]: !prev[key] }));
+    setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
 
   const enableAll = useCallback(() => {
-    setConfig(prev => {
-      const next = { ...prev };
-      for (const key of Object.keys(next)) {
-        const sits = { ...next[key].situations };
-        for (const s of Object.keys(sits)) sits[s] = true;
-        next[key] = { ...next[key], enabled: true, situations: sits };
+    update(() => {
+      const next = defaultRadioConfig();
+      // preserve per-category AI flags
+      for (const cat of RADIO_CATEGORIES) {
+        next[cat.key].aiEnabled = radioConfig[cat.key]?.aiEnabled === true;
       }
       return next;
     });
-  }, []);
+  }, [update, radioConfig]);
 
   const disableAll = useCallback(() => {
-    setConfig(prev => {
-      const next = { ...prev };
-      for (const key of Object.keys(next)) next[key] = { ...next[key], enabled: false };
+    update((prev) => {
+      const next: RadioConfig = { ...prev };
+      for (const cat of RADIO_CATEGORIES) {
+        next[cat.key] = { ...prev[cat.key], enabled: false };
+      }
       return next;
     });
-  }, []);
+  }, [update]);
 
   const aiAll = useCallback(() => {
-    setConfig(prev => {
-      const next = { ...prev };
-      for (const key of Object.keys(next)) next[key] = { ...next[key], aiEnabled: true };
+    update((prev) => {
+      const next: RadioConfig = { ...prev };
+      for (const cat of RADIO_CATEGORIES) {
+        next[cat.key] = { ...prev[cat.key], aiEnabled: true };
+      }
       return next;
     });
-  }, []);
+  }, [update]);
 
   const aiNone = useCallback(() => {
-    setConfig(prev => {
-      const next = { ...prev };
-      for (const key of Object.keys(next)) next[key] = { ...next[key], aiEnabled: false };
+    update((prev) => {
+      const next: RadioConfig = { ...prev };
+      for (const cat of RADIO_CATEGORIES) {
+        next[cat.key] = { ...prev[cat.key], aiEnabled: false };
+      }
       return next;
     });
-  }, []);
+  }, [update]);
 
   return (
     <div className="radioconfig-page">
@@ -124,7 +105,7 @@ export function RadioConfig() {
         <p className="dim">
           Select which situations the race engineer will speak about. Toggle categories on/off,
           or expand to control individual situations. Enable <strong>AI</strong> on categories
-          to use GPT Realtime voice (requires GPT mode + credits).
+          to use the Claude race-engineer voice (requires Premium API key in Settings).
         </p>
         <div className="radioconfig-actions">
           <button className="btn-action" onClick={enableAll}>Enable All</button>
@@ -132,50 +113,66 @@ export function RadioConfig() {
           <button className="btn-action ai" onClick={aiAll}>AI: All</button>
           <button className="btn-action secondary" onClick={aiNone}>AI: None</button>
           <label className="toggle-label" style={{ marginLeft: 'auto' }}>
-            <input type="checkbox" checked={masterEnabled}
-              onChange={e => setMasterEnabled(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={radioMasterEnabled}
+              onChange={(e) => setPrefs({ radioMasterEnabled: e.target.checked })}
+            />
             Master Radio On/Off
           </label>
         </div>
         <div className="radioconfig-ai-info">
-          GPT AI enabled on <strong>{aiCount}</strong> situations.
-          More situations = higher credit usage per race.
+          <strong>{enabledCount}</strong> situations enabled · AI on <strong>{aiCount}</strong> situations.
+          More AI = higher API usage per race.
         </div>
       </div>
 
       <div className="radioconfig-grid">
-        {Object.entries(RADIO_CATEGORIES).map(([key, cat]) => {
-          const cfg = config[key];
-          const isExpanded = expanded[key] || false;
-
+        {RADIO_CATEGORIES.map((cat) => {
+          const cfg = radioConfig[cat.key] ?? { enabled: false, aiEnabled: false, situations: {} };
+          const isExpanded = expanded[cat.key] || false;
           return (
-            <div key={key} className={`radioconfig-card ${cfg.enabled ? '' : 'disabled'}`}>
+            <div key={cat.key} className={`radioconfig-card ${cfg.enabled ? '' : 'disabled'}`}>
               <div className="radioconfig-card-header">
                 <label className="radioconfig-cat-toggle">
-                  <input type="checkbox" checked={cfg.enabled}
-                    onChange={e => toggleCategory(key, e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={cfg.enabled}
+                    onChange={(e) => toggleCategory(cat.key, e.target.checked)}
+                  />
                   <span className="radioconfig-icon">{cat.icon}</span>
                   <span className="radioconfig-cat-title">{cat.label}</span>
                   <span className="radioconfig-cat-count">{cat.situations.length}</span>
                 </label>
-                <label className="radioconfig-ai-toggle" title="Use AI voice for this category">
-                  <input type="checkbox" checked={cfg.aiEnabled}
-                    onChange={e => toggleAi(key, e.target.checked)} />
+                <label className="radioconfig-ai-toggle" title="Use Claude voice for this category">
+                  <input
+                    type="checkbox"
+                    checked={cfg.aiEnabled}
+                    onChange={(e) => toggleAi(cat.key, e.target.checked)}
+                  />
                   <span className="radioconfig-ai-label">AI</span>
                 </label>
-                <button className={`radioconfig-expand ${isExpanded ? 'expanded' : ''}`}
-                  onClick={() => toggleExpand(key)}>
+                <button
+                  className={`radioconfig-expand ${isExpanded ? 'expanded' : ''}`}
+                  onClick={() => toggleExpand(cat.key)}
+                >
                   {isExpanded ? '▲' : '▼'}
                 </button>
               </div>
               <div className="radioconfig-desc">{cat.description}</div>
               {isExpanded && (
                 <div className="radioconfig-situations">
-                  {cat.situations.map(sit => (
-                    <label key={sit} className="radioconfig-sit-item">
-                      <input type="checkbox" checked={cfg.situations[sit] !== false}
-                        onChange={e => toggleSituation(key, sit, e.target.checked)} />
-                      <span>{formatSitLabel(sit)}</span>
+                  {cat.situations.map((sit) => (
+                    <label key={sit.key} className="radioconfig-sit-item">
+                      <input
+                        type="checkbox"
+                        checked={cfg.situations[sit.key] !== false}
+                        onChange={(e) => toggleSituation(cat.key, sit.key, e.target.checked)}
+                      />
+                      <span>{sit.label || formatSituationLabel(sit.key)}</span>
+                      <span className={`radioconfig-sit-urgency u-${sit.urgency}`}>
+                        {sit.urgency}
+                      </span>
                     </label>
                   ))}
                 </div>
@@ -186,9 +183,9 @@ export function RadioConfig() {
       </div>
 
       <div className="radioconfig-footer">
-        <strong>How it works:</strong> In <em>Classic</em> mode, all messages use edge-tts voice (free).
-        In <em>GPT Realtime</em> mode, categories marked <strong>AI</strong> use GPT-4o voice.
-        Categories without AI still use edge-tts.
+        <strong>How it works:</strong> Categories without AI use the free edge-tts engineer voice.
+        Categories with <strong>AI</strong> ON ask Claude for a tailored radio line based on
+        live telemetry, then speak that — counts against your API usage.
       </div>
     </div>
   );

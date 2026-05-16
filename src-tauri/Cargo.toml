@@ -27,6 +27,8 @@ futures-util      = "0.3"
 base64            = "0.22"
 log               = "0.4"
 tauri-plugin-log  = "2"
+igd-next          = { version = "0.16", features = ["aio_tokio"] }
+local-ip-address  = "0.6"
 
 [profile.release]
 opt-level = 3
