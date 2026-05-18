@@ -1,6 +1,6 @@
 [package]
 name = "apex-engineer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Apex Engineer — F1 25 Race Telemetry"
 authors = ["mohd wazid ali"]
 edition = "2021"
@@ -18,6 +18,8 @@ tauri             = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs     = "2"
 tauri-plugin-shell  = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde             = { version = "1", features = ["derive"] }
 serde_json        = "1"
 tokio             = { version = "1", features = ["full"] }

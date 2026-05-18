@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useTelemetryContext } from '../context/TelemetryContext';
 import { usePrefs } from '../context/PrefsContext';
 import { usePushToTalk } from '../hooks/usePushToTalk';
+import { useAppUpdater } from '../hooks/useAppUpdater';
 import { clearCache, getStats as getCacheStats } from '../lib/phrase-cache';
 
 import { api } from '../lib/tauri-api';
@@ -833,6 +834,8 @@ export function Settings() {
           }}>+ Add mask</button>
       </div>
 
+      <UpdatesPanel />
+
       {/* Save All */}
       <div className="settings-save-section">
         <button className="btn-save-all" onClick={saveAll}>
@@ -842,6 +845,41 @@ export function Settings() {
           Saves API key, Premium flag, TTS, PTT binding, and telemetry port to disk.
         </p>
       </div>
+    </div>
+  );
+}
+
+function UpdatesPanel() {
+  // autoCheck is already handled by App's mount-time call; here we only expose a manual trigger.
+  const { phase, available, progress, error, checkNow } = useAppUpdater({ autoCheck: false });
+
+  const busy = phase === 'checking' || phase === 'downloading' || phase === 'installing';
+  const label =
+    phase === 'checking' ? 'Checking…' :
+    phase === 'downloading' ? (
+      progress?.total
+        ? `Downloading… ${Math.round((progress.downloaded / progress.total) * 100)}%`
+        : 'Downloading…'
+    ) :
+    phase === 'installing' ? 'Installing…' :
+    'Check for Updates';
+
+  return (
+    <div className="panel">
+      <h3 className="panel-title">UPDATES</h3>
+      <p className="settings-note" style={{ marginTop: 0 }}>
+        The app checks for updates on launch. You can also check manually.
+      </p>
+      <button className="btn-action" onClick={checkNow} disabled={busy}>{label}</button>
+      {available && phase !== 'downloading' && phase !== 'installing' && (
+        <p className="settings-note">New version available: v{available.version}.</p>
+      )}
+      {phase === 'up-to-date' && (
+        <p className="settings-note">You are on the latest version.</p>
+      )}
+      {phase === 'error' && error && (
+        <p className="settings-note" style={{ color: '#ff6b6b' }}>Update check failed: {error}</p>
+      )}
     </div>
   );
 }

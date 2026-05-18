@@ -15,6 +15,7 @@ import { Rival } from './pages/RivalUI';
 import { Overlay } from './pages/OverlayUI';
 import { Sidebar } from './components/Sidebar';
 import { useRivalHotkeys } from './hooks/useRivalHotkeys';
+import { useAppUpdater } from './hooks/useAppUpdater';
 
 export type Page =
   | 'dashboard'
@@ -79,6 +80,7 @@ function SinglePageWindow({ page }: { page: Page }) {
 function AppInner() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
   useRivalHotkeys();
+  useAppUpdater();
 
   return (
     <div className="app-shell">
